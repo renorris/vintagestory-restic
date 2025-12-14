@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM alpine:3.23
 
 # Install .NET 8 runtime
-RUN apk add --no-cache aspnetcore8-runtime
+RUN apk add --no-cache aspnetcore8-runtime restic
 
 # Config nonroot user
 RUN mkdir /gamedata /serverbinaries && \
