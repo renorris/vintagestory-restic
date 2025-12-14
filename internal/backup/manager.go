@@ -36,6 +36,11 @@ var ErrServerNotBooted = fmt.Errorf("server has not fully booted yet")
 // This allows for testing without actually running restic.
 type ResticRunner func(ctx context.Context, stagingDir string) error
 
+// CommandRunner is a function type for running shell commands.
+// This allows for testing without actually running commands.
+// Returns the exit code and any error.
+type CommandRunner func(ctx context.Context, name string, args ...string) (exitCode int, err error)
+
 // Manager handles periodic backups of the Vintage Story server.
 type Manager struct {
 	// Interval is the time between backups.
@@ -71,6 +76,11 @@ type Manager struct {
 	// If nil, the default restic backup command is used.
 	// This is primarily for testing.
 	ResticRunner ResticRunner
+
+	// CommandRunner is a custom function to run shell commands.
+	// If nil, the default exec.Command is used.
+	// This is primarily for testing.
+	CommandRunner CommandRunner
 
 	done   chan struct{}
 	wg     sync.WaitGroup
@@ -475,6 +485,11 @@ func (m *Manager) runRestic(ctx context.Context) error {
 		return fmt.Errorf("RESTIC_REPOSITORY environment variable is not set")
 	}
 
+	// Ensure the repository is initialized before running backup
+	if err := m.ensureRepoInitialized(ctx); err != nil {
+		return fmt.Errorf("failed to initialize restic repository: %w", err)
+	}
+
 	// Run restic backup
 	cmd := exec.CommandContext(ctx, "restic", "backup", m.StagingDir)
 	cmd.Stdout = os.Stdout
@@ -485,6 +500,57 @@ func (m *Manager) runRestic(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// ensureRepoInitialized checks if the restic repository is initialized and initializes it if not.
+// Uses "restic cat config" to check - exit code 10 means uninitialized (since restic 0.17.0).
+func (m *Manager) ensureRepoInitialized(ctx context.Context) error {
+	exitCode, output, err := m.runCommandWithOutput(ctx, "restic", "cat", "config")
+
+	// Exit code 0 means repository is already initialized
+	if exitCode == 0 {
+		return nil
+	}
+
+	// Exit code 10 means repository is not initialized (restic 0.17.0+)
+	if exitCode == 10 {
+		initExitCode, _, initErr := m.runCommandWithOutput(ctx, "restic", "init")
+		if initErr != nil {
+			return fmt.Errorf("restic init failed: %v", initErr)
+		}
+		if initExitCode != 0 {
+			return fmt.Errorf("restic init failed with exit code %d", initExitCode)
+		}
+		return nil
+	}
+
+	// Any other exit code is an error (e.g., wrong password, network error)
+	if err != nil {
+		return fmt.Errorf("restic cat config failed (exit code %d): %v\nOutput: %s", exitCode, err, output)
+	}
+	return fmt.Errorf("restic cat config failed with exit code %d\nOutput: %s", exitCode, output)
+}
+
+// runCommandWithOutput runs a command and returns its exit code and combined output.
+func (m *Manager) runCommandWithOutput(ctx context.Context, name string, args ...string) (int, string, error) {
+	// Use custom runner if provided (for testing)
+	if m.CommandRunner != nil {
+		exitCode, err := m.CommandRunner(ctx, name, args...)
+		return exitCode, "", err
+	}
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return 0, string(output), nil
+	}
+
+	// Extract exit code from error
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode(), string(output), nil
+	}
+
+	return -1, string(output), err
 }
 
 // RunBackupNow triggers an immediate backup. This is useful for testing.

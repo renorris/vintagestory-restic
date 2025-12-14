@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -971,6 +972,143 @@ func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
 			t.Errorf("performBackup() unexpected error: %v", err)
 		}
 	})
+}
+
+func TestManager_EnsureRepoInitialized_AlreadyInitialized(t *testing.T) {
+	m := &Manager{
+		Interval: time.Second,
+		Server:   &mockServer{},
+		CommandRunner: func(ctx context.Context, name string, args ...string) (int, error) {
+			// Simulate "restic cat config" succeeding (repo already initialized)
+			if name == "restic" && len(args) >= 2 && args[0] == "cat" && args[1] == "config" {
+				return 0, nil
+			}
+			return 1, fmt.Errorf("unexpected command")
+		},
+	}
+
+	ctx := context.Background()
+	err := m.ensureRepoInitialized(ctx)
+	if err != nil {
+		t.Errorf("ensureRepoInitialized() unexpected error: %v", err)
+	}
+}
+
+func TestManager_EnsureRepoInitialized_NeedsInit(t *testing.T) {
+	var initCalled bool
+
+	m := &Manager{
+		Interval: time.Second,
+		Server:   &mockServer{},
+		CommandRunner: func(ctx context.Context, name string, args ...string) (int, error) {
+			if name == "restic" {
+				if len(args) >= 2 && args[0] == "cat" && args[1] == "config" {
+					// Exit code 10 = repository not initialized
+					return 10, nil
+				}
+				if len(args) >= 1 && args[0] == "init" {
+					initCalled = true
+					return 0, nil
+				}
+			}
+			return 1, fmt.Errorf("unexpected command: %s %v", name, args)
+		},
+	}
+
+	ctx := context.Background()
+	err := m.ensureRepoInitialized(ctx)
+	if err != nil {
+		t.Errorf("ensureRepoInitialized() unexpected error: %v", err)
+	}
+
+	if !initCalled {
+		t.Error("expected restic init to be called")
+	}
+}
+
+func TestManager_EnsureRepoInitialized_InitFails(t *testing.T) {
+	m := &Manager{
+		Interval: time.Second,
+		Server:   &mockServer{},
+		CommandRunner: func(ctx context.Context, name string, args ...string) (int, error) {
+			if name == "restic" {
+				if len(args) >= 2 && args[0] == "cat" && args[1] == "config" {
+					// Exit code 10 = repository not initialized
+					return 10, nil
+				}
+				if len(args) >= 1 && args[0] == "init" {
+					// Init fails
+					return 1, nil
+				}
+			}
+			return 1, fmt.Errorf("unexpected command")
+		},
+	}
+
+	ctx := context.Background()
+	err := m.ensureRepoInitialized(ctx)
+	if err == nil {
+		t.Error("expected error when restic init fails")
+	}
+}
+
+func TestManager_EnsureRepoInitialized_OtherExitCodeIsError(t *testing.T) {
+	m := &Manager{
+		Interval: time.Second,
+		Server:   &mockServer{},
+		CommandRunner: func(ctx context.Context, name string, args ...string) (int, error) {
+			if name == "restic" && len(args) >= 2 && args[0] == "cat" && args[1] == "config" {
+				// Exit code 1 = error (wrong password, etc.)
+				return 1, nil
+			}
+			return 1, fmt.Errorf("unexpected command")
+		},
+	}
+
+	ctx := context.Background()
+	err := m.ensureRepoInitialized(ctx)
+	if err == nil {
+		t.Error("expected error when restic cat config fails with non-10 exit code")
+	}
+}
+
+func TestManager_RunCommandWithOutput(t *testing.T) {
+	m := &Manager{
+		Interval: time.Second,
+		Server:   &mockServer{},
+	}
+
+	ctx := context.Background()
+
+	// Test successful command
+	exitCode, _, err := m.runCommandWithOutput(ctx, "true")
+	if err != nil {
+		t.Errorf("runCommandWithOutput('true') unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("runCommandWithOutput('true') exit code = %d, want 0", exitCode)
+	}
+
+	// Test failing command
+	exitCode, _, err = m.runCommandWithOutput(ctx, "false")
+	if err != nil {
+		t.Errorf("runCommandWithOutput('false') unexpected error: %v", err)
+	}
+	if exitCode != 1 {
+		t.Errorf("runCommandWithOutput('false') exit code = %d, want 1", exitCode)
+	}
+
+	// Test command with output
+	exitCode, output, err := m.runCommandWithOutput(ctx, "echo", "hello")
+	if err != nil {
+		t.Errorf("runCommandWithOutput('echo hello') unexpected error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Errorf("runCommandWithOutput('echo hello') exit code = %d, want 0", exitCode)
+	}
+	if strings.TrimSpace(output) != "hello" {
+		t.Errorf("runCommandWithOutput('echo hello') output = %q, want %q", output, "hello")
+	}
 }
 
 func TestManager_RunBackup_BootCheckGuard(t *testing.T) {

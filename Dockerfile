@@ -17,15 +17,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -o vintagestory-launcher ./cmd/launcher
 
-# Install restic in a separate stage and copy it
-FROM debian:bookworm-slim AS restic-builder
-RUN apt-get update && apt-get install -y --no-install-recommends restic \
-    && rm -rf /var/lib/apt/lists/*
+# Fetch restic (/usr/bin/restic)
+FROM restic/restic:latest AS restic-fetcher
 
 FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim
 
 # Copy restic from builder
-COPY --from=restic-builder /usr/bin/restic /usr/bin/restic
+COPY --from=restic-fetcher /usr/bin/restic /usr/bin/restic
 
 # Config nonroot user
 RUN mkdir /gamedata /serverbinaries && \
