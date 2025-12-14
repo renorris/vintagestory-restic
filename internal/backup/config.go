@@ -3,6 +3,7 @@ package backup
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,10 @@ type Config struct {
 
 	// Interval is the time between backups.
 	Interval time.Duration
+
+	// BackupOnServerStart indicates whether a backup should be performed
+	// immediately when the server finishes booting.
+	BackupOnServerStart bool
 }
 
 // LoadConfig loads backup configuration from environment variables.
@@ -32,10 +37,20 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("BACKUP_INTERVAL must be positive, got %v", interval)
 	}
 
+	backupOnStart := parseBoolEnv(os.Getenv("DO_BACKUP_ON_SERVER_START"))
+
 	return &Config{
-		Enabled:  true,
-		Interval: interval,
+		Enabled:             true,
+		Interval:            interval,
+		BackupOnServerStart: backupOnStart,
 	}, nil
+}
+
+// parseBoolEnv parses a boolean from an environment variable string.
+// Returns true for "true", "1", "yes" (case-insensitive), false otherwise.
+func parseBoolEnv(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return s == "true" || s == "1" || s == "yes"
 }
 
 // ValidateResticEnv validates that required restic environment variables are set

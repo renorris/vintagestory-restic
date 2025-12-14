@@ -958,3 +958,199 @@ func TestServer_Kill_NotStarted(t *testing.T) {
 	// Should not panic
 	s.Kill()
 }
+
+// TestServer_HasBooted tests the HasBooted method and boot detection.
+func TestServer_HasBooted(t *testing.T) {
+	scriptDir := t.TempDir()
+	scriptPath := filepath.Join(scriptDir, "boot_test.sh")
+	scriptContent := `#!/bin/sh
+echo "starting up..."
+sleep 0.1
+echo "14.12.2025 19:56:10 [Server Event] Dedicated Server now running"
+sleep 0.1
+echo "accepting connections"
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("Failed to write script: %v", err)
+	}
+
+	s := &Server{
+		ServerPath: "/bin/sh",
+		Args:       []string{scriptPath},
+	}
+
+	// Should be false before start
+	if s.HasBooted() {
+		t.Error("Expected HasBooted() to be false before start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Wait for the boot pattern to be detected
+	_, err := s.WaitForPattern(ctx, "Dedicated Server now running")
+	if err != nil {
+		t.Fatalf("WaitForPattern failed: %v", err)
+	}
+
+	// Should be true after boot pattern detected
+	if !s.HasBooted() {
+		t.Error("Expected HasBooted() to be true after boot pattern detected")
+	}
+}
+
+// TestServer_HasBooted_NotDetected tests HasBooted when boot pattern is not present.
+func TestServer_HasBooted_NotDetected(t *testing.T) {
+	s := &Server{
+		ServerPath: "echo",
+		Args:       []string{"just some output without boot pattern"},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	<-s.Done()
+
+	// Should be false because boot pattern was never detected
+	if s.HasBooted() {
+		t.Error("Expected HasBooted() to be false when boot pattern not detected")
+	}
+}
+
+// TestServer_OnBoot tests the OnBoot callback.
+func TestServer_OnBoot(t *testing.T) {
+	scriptDir := t.TempDir()
+	scriptPath := filepath.Join(scriptDir, "onboot_test.sh")
+	scriptContent := `#!/bin/sh
+echo "starting..."
+echo "Dedicated Server now running"
+echo "done"
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("Failed to write script: %v", err)
+	}
+
+	var onBootCalled bool
+	var mu sync.Mutex
+
+	s := &Server{
+		ServerPath: "/bin/sh",
+		Args:       []string{scriptPath},
+		OnBoot: func() {
+			mu.Lock()
+			onBootCalled = true
+			mu.Unlock()
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	<-s.Done()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !onBootCalled {
+		t.Error("Expected OnBoot callback to be called")
+	}
+}
+
+// TestServer_OnBoot_CalledOnlyOnce tests that OnBoot is only called once even with multiple boot patterns.
+func TestServer_OnBoot_CalledOnlyOnce(t *testing.T) {
+	scriptDir := t.TempDir()
+	scriptPath := filepath.Join(scriptDir, "onboot_once_test.sh")
+	scriptContent := `#!/bin/sh
+echo "Dedicated Server now running"
+echo "Dedicated Server now running"
+echo "Dedicated Server now running"
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("Failed to write script: %v", err)
+	}
+
+	var onBootCount int
+	var mu sync.Mutex
+
+	s := &Server{
+		ServerPath: "/bin/sh",
+		Args:       []string{scriptPath},
+		OnBoot: func() {
+			mu.Lock()
+			onBootCount++
+			mu.Unlock()
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	<-s.Done()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if onBootCount != 1 {
+		t.Errorf("Expected OnBoot to be called exactly once, but was called %d times", onBootCount)
+	}
+}
+
+// TestServer_HasBooted_CannotUnset tests that HasBooted cannot be unset once set.
+func TestServer_HasBooted_CannotUnset(t *testing.T) {
+	scriptDir := t.TempDir()
+	scriptPath := filepath.Join(scriptDir, "boot_unset_test.sh")
+	scriptContent := `#!/bin/sh
+echo "Dedicated Server now running"
+sleep 0.2
+`
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+		t.Fatalf("Failed to write script: %v", err)
+	}
+
+	s := &Server{
+		ServerPath: "/bin/sh",
+		Args:       []string{scriptPath},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Wait for boot pattern
+	_, err := s.WaitForPattern(ctx, "Dedicated Server now running")
+	if err != nil {
+		t.Fatalf("WaitForPattern failed: %v", err)
+	}
+
+	// Verify booted
+	if !s.HasBooted() {
+		t.Fatal("Expected HasBooted() to be true")
+	}
+
+	// Wait for process to exit
+	<-s.Done()
+
+	// Should still be true after exit
+	if !s.HasBooted() {
+		t.Error("Expected HasBooted() to remain true after server exit")
+	}
+}

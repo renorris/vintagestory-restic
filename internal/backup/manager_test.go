@@ -22,6 +22,24 @@ type mockServer struct {
 	waitErr     error
 }
 
+// mockBootChecker implements BootChecker for testing.
+type mockBootChecker struct {
+	mu        sync.Mutex
+	hasBooted bool
+}
+
+func (m *mockBootChecker) HasBooted() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.hasBooted
+}
+
+func (m *mockBootChecker) SetBooted(booted bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hasBooted = booted
+}
+
 func (m *mockServer) SendCommand(cmd string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -843,4 +861,153 @@ func TestManager_PerformBackup_CleansUpStagingOnResticFailure(t *testing.T) {
 	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
 		t.Error("Expected staging directory to be cleaned up even on failure")
 	}
+}
+
+func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
+	t.Run("backup fails when server not booted", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+
+		bootChecker := &mockBootChecker{hasBooted: false}
+
+		m := &Manager{
+			Interval:    time.Second,
+			Server:      &mockServer{},
+			BootChecker: bootChecker,
+			GameDataDir: gameDataDir,
+		}
+
+		ctx := context.Background()
+		err := m.performBackup(ctx)
+
+		if err != ErrServerNotBooted {
+			t.Errorf("performBackup() error = %v, want ErrServerNotBooted", err)
+		}
+	})
+
+	t.Run("backup proceeds when server has booted", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+		stagingDir := t.TempDir()
+		backupsDir := filepath.Join(gameDataDir, "Backups")
+		os.MkdirAll(backupsDir, 0755)
+
+		// Create serverconfig.json
+		config := map[string]interface{}{
+			"WorldConfig": map[string]interface{}{
+				"SaveFileLocation": "/gamedata/Saves/test.vcdbs",
+			},
+		}
+		configData, _ := json.Marshal(config)
+		os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), configData, 0644)
+
+		bootChecker := &mockBootChecker{hasBooted: true}
+
+		m := &Manager{
+			Interval:      time.Second,
+			Server:        &mockServer{},
+			BootChecker:   bootChecker,
+			GameDataDir:   gameDataDir,
+			StagingDir:    stagingDir,
+			BackupTimeout: 2 * time.Second,
+			ResticRunner: func(ctx context.Context, stagingDir string) error {
+				return nil
+			},
+		}
+
+		// Create a backup file that will be found
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			backupFile := filepath.Join(backupsDir, "backup.vcdbs")
+			os.WriteFile(backupFile, []byte("backup data"), 0644)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := m.performBackup(ctx)
+		if err != nil {
+			t.Errorf("performBackup() unexpected error: %v", err)
+		}
+	})
+
+	t.Run("backup proceeds when no boot checker configured", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+		stagingDir := t.TempDir()
+		backupsDir := filepath.Join(gameDataDir, "Backups")
+		os.MkdirAll(backupsDir, 0755)
+
+		// Create serverconfig.json
+		config := map[string]interface{}{
+			"WorldConfig": map[string]interface{}{
+				"SaveFileLocation": "/gamedata/Saves/test.vcdbs",
+			},
+		}
+		configData, _ := json.Marshal(config)
+		os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), configData, 0644)
+
+		// No BootChecker set
+		m := &Manager{
+			Interval:      time.Second,
+			Server:        &mockServer{},
+			GameDataDir:   gameDataDir,
+			StagingDir:    stagingDir,
+			BackupTimeout: 2 * time.Second,
+			ResticRunner: func(ctx context.Context, stagingDir string) error {
+				return nil
+			},
+		}
+
+		// Create a backup file that will be found
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			backupFile := filepath.Join(backupsDir, "backup.vcdbs")
+			os.WriteFile(backupFile, []byte("backup data"), 0644)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := m.performBackup(ctx)
+		if err != nil {
+			t.Errorf("performBackup() unexpected error: %v", err)
+		}
+	})
+}
+
+func TestManager_RunBackup_BootCheckGuard(t *testing.T) {
+	t.Run("runBackup skips when server not booted", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+
+		bootChecker := &mockBootChecker{hasBooted: false}
+
+		var completeCalled bool
+		var completeErr error
+		var mu sync.Mutex
+
+		m := &Manager{
+			Interval:    time.Second,
+			Server:      &mockServer{},
+			BootChecker: bootChecker,
+			GameDataDir: gameDataDir,
+			OnBackupComplete: func(err error, duration time.Duration) {
+				mu.Lock()
+				completeCalled = true
+				completeErr = err
+				mu.Unlock()
+			},
+		}
+
+		ctx := context.Background()
+		m.runBackup(ctx)
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		if !completeCalled {
+			t.Error("OnBackupComplete should have been called")
+		}
+
+		if completeErr != ErrServerNotBooted {
+			t.Errorf("OnBackupComplete error = %v, want ErrServerNotBooted", completeErr)
+		}
+	})
 }

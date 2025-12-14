@@ -22,6 +22,16 @@ type ServerCommander interface {
 	WaitForPattern(ctx context.Context, pattern string) (string, error)
 }
 
+// BootChecker is an interface for checking if the server has fully booted.
+// This allows the backup manager to wait until the server is ready before
+// attempting backups.
+type BootChecker interface {
+	HasBooted() bool
+}
+
+// ErrServerNotBooted is returned when a backup is attempted before the server has fully booted.
+var ErrServerNotBooted = fmt.Errorf("server has not fully booted yet")
+
 // ResticRunner is a function type for running restic backups.
 // This allows for testing without actually running restic.
 type ResticRunner func(ctx context.Context, stagingDir string) error
@@ -40,6 +50,11 @@ type Manager struct {
 
 	// Server is the Vintage Story server to send backup commands to.
 	Server ServerCommander
+
+	// BootChecker is used to check if the server has fully booted.
+	// If set, backups will only run after the server has booted.
+	// If nil, the boot check is skipped.
+	BootChecker BootChecker
 
 	// OnBackupStart is called when a backup starts. Optional.
 	OnBackupStart func()
@@ -168,6 +183,11 @@ func (m *Manager) runBackup(ctx context.Context) {
 
 // performBackup executes the full backup workflow.
 func (m *Manager) performBackup(ctx context.Context) error {
+	// Step 0: Check if server has booted (if BootChecker is configured)
+	if m.BootChecker != nil && !m.BootChecker.HasBooted() {
+		return ErrServerNotBooted
+	}
+
 	// Step 1: Get the save file name from serverconfig.json
 	saveFileName, err := m.getSaveFileName()
 	if err != nil {
@@ -351,7 +371,8 @@ func (m *Manager) createStagingDirectory(backupFile, saveFileName string) error 
 	}
 
 	dstSaveFile := filepath.Join(savesDir, saveFileName)
-	if err := os.Rename(backupFile, dstSaveFile); err != nil {
+	// Use mv command which handles cross-device moves automatically
+	if err := exec.Command("mv", backupFile, dstSaveFile).Run(); err != nil {
 		return fmt.Errorf("failed to move backup file: %w", err)
 	}
 
@@ -473,3 +494,6 @@ func (m *Manager) RunBackupNow(ctx context.Context) error {
 
 // Ensure Server implements ServerCommander at compile time.
 var _ ServerCommander = (*server.Server)(nil)
+
+// Ensure Server implements BootChecker at compile time.
+var _ BootChecker = (*server.Server)(nil)

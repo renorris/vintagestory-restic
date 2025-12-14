@@ -56,6 +56,9 @@ func run() error {
 		fmt.Println("WARNING: BACKUP_INTERVAL not set. Periodic backups are disabled.")
 	} else {
 		fmt.Printf("Backups enabled with interval: %v\n", backupConfig.Interval)
+		if backupConfig.BackupOnServerStart {
+			fmt.Println("Backup on server start is enabled.")
+		}
 
 		// Validate that required restic environment variables are set
 		if err := backup.ValidateResticEnv(); err != nil {
@@ -82,22 +85,16 @@ func run() error {
 		},
 	}
 
-	fmt.Println("Starting Vintage Story server...")
-	if err := srv.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start server: %w", err)
-	}
-
-	fmt.Printf("Server started with PID %d\n", srv.PID())
-
-	// Stage 3: Start backup manager if enabled
+	// Stage 3: Start backup manager if enabled (create before starting server so we can use OnBoot)
 	var backupManager *backup.Manager
 	if backupConfig.Enabled {
 		backupManager = &backup.Manager{
 			Interval:    backupConfig.Interval,
 			GameDataDir: "/gamedata",
 			Server:      srv,
+			BootChecker: srv,
 			OnBackupStart: func() {
-				fmt.Println("Starting periodic backup...")
+				fmt.Println("Starting backup...")
 			},
 			OnBackupComplete: func(err error, duration time.Duration) {
 				if err != nil {
@@ -108,6 +105,28 @@ func run() error {
 			},
 		}
 
+		// Set up OnBoot callback for backup-on-start if configured
+		if backupConfig.BackupOnServerStart {
+			srv.OnBoot = func() {
+				fmt.Println("Server boot detected, triggering immediate backup...")
+				go func() {
+					if err := backupManager.RunBackupNow(ctx); err != nil {
+						fmt.Printf("Backup on server start failed: %v\n", err)
+					}
+				}()
+			}
+		}
+	}
+
+	fmt.Println("Starting Vintage Story server...")
+	if err := srv.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start server: %w", err)
+	}
+
+	fmt.Printf("Server started with PID %d\n", srv.PID())
+
+	// Start the backup manager after the server has started
+	if backupManager != nil {
 		if err := backupManager.Start(ctx); err != nil {
 			fmt.Printf("WARNING: Failed to start backup manager: %v\n", err)
 		} else {

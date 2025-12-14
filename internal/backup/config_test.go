@@ -76,6 +76,7 @@ func TestLoadConfig(t *testing.T) {
 				os.Setenv("BACKUP_INTERVAL", tt.envValue)
 			}
 			defer os.Unsetenv("BACKUP_INTERVAL")
+			defer os.Unsetenv("DO_BACKUP_ON_SERVER_START")
 
 			config, err := LoadConfig()
 
@@ -96,6 +97,131 @@ func TestLoadConfig(t *testing.T) {
 
 			if tt.expectEnabled && config.Interval != tt.expectInterval {
 				t.Errorf("LoadConfig().Interval = %v, want %v", config.Interval, tt.expectInterval)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_BackupOnServerStart(t *testing.T) {
+	tests := []struct {
+		name                      string
+		backupOnStartEnv          string
+		expectBackupOnServerStart bool
+	}{
+		{
+			name:                      "not set",
+			backupOnStartEnv:          "",
+			expectBackupOnServerStart: false,
+		},
+		{
+			name:                      "true",
+			backupOnStartEnv:          "true",
+			expectBackupOnServerStart: true,
+		},
+		{
+			name:                      "TRUE uppercase",
+			backupOnStartEnv:          "TRUE",
+			expectBackupOnServerStart: true,
+		},
+		{
+			name:                      "True mixed case",
+			backupOnStartEnv:          "True",
+			expectBackupOnServerStart: true,
+		},
+		{
+			name:                      "1",
+			backupOnStartEnv:          "1",
+			expectBackupOnServerStart: true,
+		},
+		{
+			name:                      "yes",
+			backupOnStartEnv:          "yes",
+			expectBackupOnServerStart: true,
+		},
+		{
+			name:                      "YES uppercase",
+			backupOnStartEnv:          "YES",
+			expectBackupOnServerStart: true,
+		},
+		{
+			name:                      "false",
+			backupOnStartEnv:          "false",
+			expectBackupOnServerStart: false,
+		},
+		{
+			name:                      "0",
+			backupOnStartEnv:          "0",
+			expectBackupOnServerStart: false,
+		},
+		{
+			name:                      "no",
+			backupOnStartEnv:          "no",
+			expectBackupOnServerStart: false,
+		},
+		{
+			name:                      "invalid value",
+			backupOnStartEnv:          "invalid",
+			expectBackupOnServerStart: false,
+		},
+		{
+			name:                      "whitespace around true",
+			backupOnStartEnv:          "  true  ",
+			expectBackupOnServerStart: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set backup interval to enable backups
+			os.Setenv("BACKUP_INTERVAL", "1h")
+			defer os.Unsetenv("BACKUP_INTERVAL")
+
+			if tt.backupOnStartEnv == "" {
+				os.Unsetenv("DO_BACKUP_ON_SERVER_START")
+			} else {
+				os.Setenv("DO_BACKUP_ON_SERVER_START", tt.backupOnStartEnv)
+			}
+			defer os.Unsetenv("DO_BACKUP_ON_SERVER_START")
+
+			config, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig() unexpected error: %v", err)
+			}
+
+			if config.BackupOnServerStart != tt.expectBackupOnServerStart {
+				t.Errorf("LoadConfig().BackupOnServerStart = %v, want %v", config.BackupOnServerStart, tt.expectBackupOnServerStart)
+			}
+		})
+	}
+}
+
+func TestParseBoolEnv(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{"true", true},
+		{"TRUE", true},
+		{"True", true},
+		{"1", true},
+		{"yes", true},
+		{"YES", true},
+		{"Yes", true},
+		{"false", false},
+		{"FALSE", false},
+		{"0", false},
+		{"no", false},
+		{"", false},
+		{"invalid", false},
+		{"  true  ", true},
+		{"  1  ", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := parseBoolEnv(tt.input)
+			if result != tt.expected {
+				t.Errorf("parseBoolEnv(%q) = %v, want %v", tt.input, result, tt.expected)
 			}
 		})
 	}

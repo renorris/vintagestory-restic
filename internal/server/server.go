@@ -12,7 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // ErrServerNotRunning is returned when attempting operations on a server that isn't running.
@@ -27,6 +29,9 @@ var ErrServerExited = errors.New("server exited unexpectedly")
 // OutputHandler is a callback function for handling server output lines.
 // Return false to unsubscribe from further output.
 type OutputHandler func(line string) bool
+
+// BootPattern is the pattern that indicates the server has fully booted.
+const BootPattern = "Dedicated Server now running"
 
 // Server wraps a Vintage Story server process and provides methods for
 // interacting with its stdin/stdout streams.
@@ -51,6 +56,10 @@ type Server struct {
 	// This is useful for logging or monitoring. It runs in a separate goroutine.
 	OnOutput OutputHandler
 
+	// OnBoot is called exactly once when the server has fully booted.
+	// This is triggered when the "Dedicated Server now running" pattern is detected.
+	OnBoot func()
+
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
 	stdout  io.ReadCloser
@@ -62,8 +71,10 @@ type Server struct {
 	outputMu       sync.RWMutex
 	outputHandlers []OutputHandler
 
-	started bool
-	mu      sync.Mutex
+	started   bool
+	mu        sync.Mutex
+	hasBooted atomic.Bool
+	bootOnce  sync.Once
 }
 
 // Start launches the server process and begins reading its output.
@@ -150,6 +161,16 @@ func (s *Server) readOutput(r io.Reader, prefix string) {
 
 	for scanner.Scan() {
 		line := scanner.Text()
+
+		// Check for boot pattern and set hasBooted flag (only once)
+		if strings.Contains(line, BootPattern) {
+			s.bootOnce.Do(func() {
+				s.hasBooted.Store(true)
+				if s.OnBoot != nil {
+					s.OnBoot()
+				}
+			})
+		}
 
 		// Call the main output handler if set
 		if s.OnOutput != nil {
@@ -375,6 +396,13 @@ func (s *Server) Running() bool {
 	default:
 		return true
 	}
+}
+
+// HasBooted returns true if the server has fully booted.
+// This is determined by detecting the "Dedicated Server now running" pattern
+// in the server output. Once set, this flag cannot be unset.
+func (s *Server) HasBooted() bool {
+	return s.hasBooted.Load()
 }
 
 // ExitError returns the error from the server process exit, if any.
