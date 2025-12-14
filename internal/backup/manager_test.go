@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -369,6 +370,10 @@ func TestManager_CreateStagingDirectory(t *testing.T) {
 		Server:      &mockServer{},
 		GameDataDir: gameDataDir,
 		StagingDir:  stagingDir,
+		// Mock VACUUM to just copy the file (simulates what VACUUM INTO does)
+		SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+			return copyFileRegular(srcPath, dstPath)
+		},
 	}
 
 	// Create staging directory
@@ -398,7 +403,7 @@ func TestManager_CreateStagingDirectory(t *testing.T) {
 		t.Error("Expected save file to exist in staging")
 	}
 
-	// Verify content was moved
+	// Verify content was vacuumed (copied) to staging
 	content, err := os.ReadFile(saveFile)
 	if err != nil {
 		t.Fatalf("Failed to read save file: %v", err)
@@ -407,9 +412,9 @@ func TestManager_CreateStagingDirectory(t *testing.T) {
 		t.Errorf("Save file content = %q, want %q", string(content), "backup data")
 	}
 
-	// Verify the original backup file was moved (no longer exists at original location)
+	// Verify the original backup file was removed after vacuum
 	if _, err := os.Stat(backupFile); !os.IsNotExist(err) {
-		t.Error("Expected original backup file to be moved (not exist at original location)")
+		t.Error("Expected original backup file to be removed after vacuum")
 	}
 }
 
@@ -764,6 +769,10 @@ func TestManager_PerformBackup_CleansUpBackupFile(t *testing.T) {
 		ResticRunner: func(ctx context.Context, stagingDir string) error {
 			return nil
 		},
+		// Mock VACUUM to copy the file
+		SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+			return copyFileRegular(srcPath, dstPath)
+		},
 	}
 
 	// Create a backup file that will be found
@@ -816,6 +825,10 @@ func TestManager_PerformBackup_CleansUpStagingOnResticFailure(t *testing.T) {
 		// Mock restic to fail
 		ResticRunner: func(ctx context.Context, stagingDir string) error {
 			return fmt.Errorf("simulated restic failure")
+		},
+		// Mock VACUUM to copy the file
+		SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+			return copyFileRegular(srcPath, dstPath)
 		},
 	}
 
@@ -896,6 +909,9 @@ func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
+			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+				return copyFileRegular(srcPath, dstPath)
+			},
 		}
 
 		// Create a backup file that will be found
@@ -938,6 +954,9 @@ func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
 			BackupTimeout: 2 * time.Second,
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
+			},
+			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+				return copyFileRegular(srcPath, dstPath)
 			},
 		}
 
@@ -1030,6 +1049,9 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
+			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+				return copyFileRegular(srcPath, dstPath)
+			},
 		}
 
 		// Create a backup file that will be found
@@ -1079,6 +1101,9 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
+			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+				return copyFileRegular(srcPath, dstPath)
+			},
 		}
 
 		// Create a backup file that will be found
@@ -1125,6 +1150,9 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			BackupTimeout:      2 * time.Second,
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
+			},
+			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+				return copyFileRegular(srcPath, dstPath)
 			},
 		}
 
@@ -1173,6 +1201,9 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			BackupTimeout:      2 * time.Second,
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
+			},
+			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+				return copyFileRegular(srcPath, dstPath)
 			},
 		}
 
@@ -1344,6 +1375,228 @@ func TestManager_RunCommandWithOutput(t *testing.T) {
 	}
 	if strings.TrimSpace(output) != "hello" {
 		t.Errorf("runCommandWithOutput('echo hello') output = %q, want %q", output, "hello")
+	}
+}
+
+func TestManager_VacuumDatabase(t *testing.T) {
+	t.Run("successful vacuum with real sqlite3", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		srcPath := filepath.Join(tmpDir, "source.db")
+		dstPath := filepath.Join(tmpDir, "dest.db")
+
+		// Create a simple SQLite database
+		// We'll use the sqlite3 command to create it
+		cmd := exec.Command("sqlite3", srcPath, "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO test VALUES (1, 'hello');")
+		if err := cmd.Run(); err != nil {
+			t.Skipf("sqlite3 not available: %v", err)
+		}
+
+		m := &Manager{
+			Interval: time.Second,
+			Server:   &mockServer{},
+		}
+
+		ctx := context.Background()
+		err := m.vacuumDatabase(ctx, srcPath, dstPath)
+		if err != nil {
+			t.Fatalf("vacuumDatabase() failed: %v", err)
+		}
+
+		// Verify the destination file exists
+		if _, err := os.Stat(dstPath); os.IsNotExist(err) {
+			t.Error("destination file should exist after vacuum")
+		}
+
+		// Verify the destination file is a valid SQLite database with our data
+		output, err := exec.Command("sqlite3", dstPath, "SELECT name FROM test WHERE id=1;").Output()
+		if err != nil {
+			t.Fatalf("failed to query vacuumed database: %v", err)
+		}
+		if strings.TrimSpace(string(output)) != "hello" {
+			t.Errorf("vacuumed database content = %q, want %q", strings.TrimSpace(string(output)), "hello")
+		}
+	})
+
+	t.Run("uses custom SQLiteVacuumRunner when provided", func(t *testing.T) {
+		var runnerCalled bool
+		var capturedSrc, capturedDst string
+
+		m := &Manager{
+			Interval: time.Second,
+			Server:   &mockServer{},
+			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+				runnerCalled = true
+				capturedSrc = srcPath
+				capturedDst = dstPath
+				return nil
+			},
+		}
+
+		ctx := context.Background()
+		err := m.vacuumDatabase(ctx, "/src/path.db", "/dst/path.db")
+		if err != nil {
+			t.Fatalf("vacuumDatabase() failed: %v", err)
+		}
+
+		if !runnerCalled {
+			t.Error("custom SQLiteVacuumRunner should have been called")
+		}
+		if capturedSrc != "/src/path.db" {
+			t.Errorf("srcPath = %q, want %q", capturedSrc, "/src/path.db")
+		}
+		if capturedDst != "/dst/path.db" {
+			t.Errorf("dstPath = %q, want %q", capturedDst, "/dst/path.db")
+		}
+	})
+
+	t.Run("returns error from custom SQLiteVacuumRunner", func(t *testing.T) {
+		expectedErr := fmt.Errorf("simulated vacuum failure")
+
+		m := &Manager{
+			Interval: time.Second,
+			Server:   &mockServer{},
+			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+				return expectedErr
+			},
+		}
+
+		ctx := context.Background()
+		err := m.vacuumDatabase(ctx, "/src/path.db", "/dst/path.db")
+		if err != expectedErr {
+			t.Errorf("vacuumDatabase() error = %v, want %v", err, expectedErr)
+		}
+	})
+
+	t.Run("fails with invalid destination path", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		srcPath := filepath.Join(tmpDir, "source.db")
+
+		// Create a simple SQLite database
+		cmd := exec.Command("sqlite3", srcPath, "CREATE TABLE test (id INTEGER);")
+		if err := cmd.Run(); err != nil {
+			t.Skipf("sqlite3 not available: %v", err)
+		}
+
+		// Destination in a non-existent directory should fail
+		dstPath := filepath.Join(tmpDir, "nonexistent", "subdir", "dest.db")
+
+		m := &Manager{
+			Interval: time.Second,
+			Server:   &mockServer{},
+		}
+
+		ctx := context.Background()
+		err := m.vacuumDatabase(ctx, srcPath, dstPath)
+		if err == nil {
+			t.Error("vacuumDatabase() expected error for invalid destination path")
+		}
+	})
+}
+
+func TestManager_CreateStagingDirectory_VacuumsBackupFile(t *testing.T) {
+	// Create game data directory with test content
+	gameDataDir := t.TempDir()
+	stagingDir := t.TempDir()
+
+	// Create test directories
+	backupsDir := filepath.Join(gameDataDir, "Backups")
+	if err := os.MkdirAll(backupsDir, 0755); err != nil {
+		t.Fatalf("Failed to create Backups dir: %v", err)
+	}
+
+	// Create test config
+	if err := os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), []byte("{}"), 0644); err != nil {
+		t.Fatalf("Failed to write config: %v", err)
+	}
+
+	// Create a backup file
+	backupFile := filepath.Join(backupsDir, "backup.vcdbs")
+	if err := os.WriteFile(backupFile, []byte("backup data"), 0644); err != nil {
+		t.Fatalf("Failed to write backup file: %v", err)
+	}
+
+	var vacuumCalled bool
+	var vacuumSrc, vacuumDst string
+
+	m := &Manager{
+		Interval:    time.Second,
+		Server:      &mockServer{},
+		GameDataDir: gameDataDir,
+		StagingDir:  stagingDir,
+		SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+			vacuumCalled = true
+			vacuumSrc = srcPath
+			vacuumDst = dstPath
+			// Simulate VACUUM by copying the file
+			return copyFileRegular(srcPath, dstPath)
+		},
+	}
+
+	// Create staging directory
+	if err := m.createStagingDirectory(backupFile, "default.vcdbs"); err != nil {
+		t.Fatalf("createStagingDirectory() failed: %v", err)
+	}
+
+	// Verify vacuum was called
+	if !vacuumCalled {
+		t.Error("SQLiteVacuumRunner should have been called")
+	}
+
+	// Verify vacuum was called with correct paths
+	if vacuumSrc != backupFile {
+		t.Errorf("vacuum srcPath = %q, want %q", vacuumSrc, backupFile)
+	}
+	expectedDst := filepath.Join(stagingDir, "Saves", "default.vcdbs")
+	if vacuumDst != expectedDst {
+		t.Errorf("vacuum dstPath = %q, want %q", vacuumDst, expectedDst)
+	}
+
+	// Verify the vacuumed file exists in staging
+	if _, err := os.Stat(expectedDst); os.IsNotExist(err) {
+		t.Error("Expected vacuumed save file to exist in staging")
+	}
+
+	// Verify the original backup file was removed
+	if _, err := os.Stat(backupFile); !os.IsNotExist(err) {
+		t.Error("Expected original backup file to be removed after vacuum")
+	}
+}
+
+func TestManager_CreateStagingDirectory_VacuumFailure(t *testing.T) {
+	gameDataDir := t.TempDir()
+	stagingDir := t.TempDir()
+	backupsDir := filepath.Join(gameDataDir, "Backups")
+	os.MkdirAll(backupsDir, 0755)
+
+	// Create test config
+	os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), []byte("{}"), 0644)
+
+	// Create a backup file
+	backupFile := filepath.Join(backupsDir, "backup.vcdbs")
+	os.WriteFile(backupFile, []byte("backup data"), 0644)
+
+	m := &Manager{
+		Interval:    time.Second,
+		Server:      &mockServer{},
+		GameDataDir: gameDataDir,
+		StagingDir:  stagingDir,
+		SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+			return fmt.Errorf("simulated vacuum failure")
+		},
+	}
+
+	err := m.createStagingDirectory(backupFile, "default.vcdbs")
+	if err == nil {
+		t.Error("createStagingDirectory() expected error when vacuum fails")
+	}
+
+	if !strings.Contains(err.Error(), "vacuum") {
+		t.Errorf("error should mention vacuum: %v", err)
+	}
+
+	// The original backup file should still exist since vacuum failed
+	if _, err := os.Stat(backupFile); os.IsNotExist(err) {
+		t.Error("Original backup file should still exist when vacuum fails")
 	}
 }
 

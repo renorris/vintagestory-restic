@@ -25,6 +25,11 @@ FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim
 # Copy restic from builder
 COPY --from=restic-fetcher /usr/bin/restic /usr/bin/restic
 
+# Install sqlite3 for VACUUM INTO preprocessing of backup files
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends sqlite3 && \
+    rm -rf /var/lib/apt/lists/*
+
 # Config nonroot user
 RUN mkdir /gamedata /serverbinaries && \
     groupadd -g 2001 vsgroup && \

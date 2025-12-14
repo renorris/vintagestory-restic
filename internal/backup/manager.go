@@ -41,6 +41,11 @@ type ResticRunner func(ctx context.Context, stagingDir string) error
 // Returns the exit code and any error.
 type CommandRunner func(ctx context.Context, name string, args ...string) (exitCode int, err error)
 
+// SQLiteVacuumRunner is a function type for running sqlite3 VACUUM INTO.
+// This allows for testing without actually running sqlite3.
+// srcPath is the source database file, dstPath is the destination.
+type SQLiteVacuumRunner func(ctx context.Context, srcPath, dstPath string) error
+
 // PlayerCheckerInterface is an interface for checking if players are online.
 // This allows for testing without a real player checker.
 type PlayerCheckerInterface interface {
@@ -100,6 +105,11 @@ type Manager struct {
 	// If nil, the default exec.Command is used.
 	// This is primarily for testing.
 	CommandRunner CommandRunner
+
+	// SQLiteVacuumRunner is a custom function to run sqlite3 VACUUM INTO.
+	// If nil, the default sqlite3 command is used.
+	// This is primarily for testing.
+	SQLiteVacuumRunner SQLiteVacuumRunner
 
 	done   chan struct{}
 	wg     sync.WaitGroup
@@ -399,19 +409,24 @@ func (m *Manager) createStagingDirectory(backupFile, saveFileName string) error 
 		}
 	}
 
-	// Create the Saves directory and move the backup file with the correct name.
-	// We use os.Rename to move instead of copy to avoid the overhead of copying
-	// this potentially very large file. The backup file will be cleaned up
-	// when the staging directory is removed.
+	// Create the Saves directory
 	savesDir := filepath.Join(m.StagingDir, "Saves")
 	if err := os.MkdirAll(savesDir, 0755); err != nil {
 		return fmt.Errorf("failed to create Saves directory: %w", err)
 	}
 
+	// VACUUM the backup file into the staging directory.
+	// This produces a canonical, deterministic SQLite database that maximizes
+	// restic's deduplication efficiency by ensuring unchanged data produces
+	// identical byte sequences.
 	dstSaveFile := filepath.Join(savesDir, saveFileName)
-	// Use mv command which handles cross-device moves automatically
-	if err := exec.Command("mv", backupFile, dstSaveFile).Run(); err != nil {
-		return fmt.Errorf("failed to move backup file: %w", err)
+	if err := m.vacuumDatabase(context.Background(), backupFile, dstSaveFile); err != nil {
+		return fmt.Errorf("failed to vacuum backup file: %w", err)
+	}
+
+	// Remove the original backup file since we've vacuumed it to the destination
+	if err := os.Remove(backupFile); err != nil {
+		return fmt.Errorf("failed to remove original backup file: %w", err)
 	}
 
 	return nil
@@ -491,6 +506,27 @@ func copyFileRegular(src, dst string) error {
 			}
 			return readErr
 		}
+	}
+
+	return nil
+}
+
+// vacuumDatabase runs sqlite3 VACUUM INTO to create a canonical, deterministic
+// copy of the SQLite database at dstPath. This maximizes restic's deduplication
+// efficiency by ensuring unchanged data produces identical byte sequences.
+func (m *Manager) vacuumDatabase(ctx context.Context, srcPath, dstPath string) error {
+	// Use custom runner if provided (for testing)
+	if m.SQLiteVacuumRunner != nil {
+		return m.SQLiteVacuumRunner(ctx, srcPath, dstPath)
+	}
+
+	// Build the VACUUM INTO command
+	// sqlite3 src.db "VACUUM INTO 'dst.db'"
+	vacuumCmd := fmt.Sprintf("VACUUM INTO '%s'", dstPath)
+	cmd := exec.CommandContext(ctx, "sqlite3", srcPath, vacuumCmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sqlite3 VACUUM INTO failed: %w\nOutput: %s", err, string(output))
 	}
 
 	return nil
