@@ -1,0 +1,175 @@
+package backup
+
+import (
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestLoadConfig(t *testing.T) {
+	tests := []struct {
+		name           string
+		envValue       string
+		expectEnabled  bool
+		expectInterval time.Duration
+		expectErr      bool
+	}{
+		{
+			name:          "not set",
+			envValue:      "",
+			expectEnabled: false,
+		},
+		{
+			name:           "valid seconds",
+			envValue:       "60",
+			expectEnabled:  true,
+			expectInterval: 60 * time.Second,
+		},
+		{
+			name:           "valid minutes",
+			envValue:       "5m",
+			expectEnabled:  true,
+			expectInterval: 5 * time.Minute,
+		},
+		{
+			name:           "valid hours",
+			envValue:       "1h",
+			expectEnabled:  true,
+			expectInterval: time.Hour,
+		},
+		{
+			name:           "valid days",
+			envValue:       "1d",
+			expectEnabled:  true,
+			expectInterval: 24 * time.Hour,
+		},
+		{
+			name:           "valid weeks",
+			envValue:       "1w",
+			expectEnabled:  true,
+			expectInterval: 7 * 24 * time.Hour,
+		},
+		{
+			name:      "invalid format",
+			envValue:  "invalid",
+			expectErr: true,
+		},
+		{
+			name:      "zero duration",
+			envValue:  "0",
+			expectErr: true,
+		},
+		{
+			name:      "negative duration",
+			envValue:  "-5s",
+			expectErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set or unset environment variable
+			if tt.envValue == "" {
+				os.Unsetenv("BACKUP_INTERVAL")
+			} else {
+				os.Setenv("BACKUP_INTERVAL", tt.envValue)
+			}
+			defer os.Unsetenv("BACKUP_INTERVAL")
+
+			config, err := LoadConfig()
+
+			if tt.expectErr {
+				if err == nil {
+					t.Error("LoadConfig() expected error, got nil")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("LoadConfig() unexpected error: %v", err)
+			}
+
+			if config.Enabled != tt.expectEnabled {
+				t.Errorf("LoadConfig().Enabled = %v, want %v", config.Enabled, tt.expectEnabled)
+			}
+
+			if tt.expectEnabled && config.Interval != tt.expectInterval {
+				t.Errorf("LoadConfig().Interval = %v, want %v", config.Interval, tt.expectInterval)
+			}
+		})
+	}
+}
+
+func TestValidateResticEnv(t *testing.T) {
+	tests := []struct {
+		name           string
+		repository     string
+		password       string
+		expectErr      bool
+		expectedErrMsg string
+	}{
+		{
+			name:       "both set",
+			repository: "s3:s3.amazonaws.com/bucket",
+			password:   "secret123",
+			expectErr:  false,
+		},
+		{
+			name:           "repository missing",
+			repository:     "",
+			password:       "secret123",
+			expectErr:      true,
+			expectedErrMsg: "RESTIC_REPOSITORY",
+		},
+		{
+			name:           "password missing",
+			repository:     "s3:s3.amazonaws.com/bucket",
+			password:       "",
+			expectErr:      true,
+			expectedErrMsg: "RESTIC_PASSWORD",
+		},
+		{
+			name:           "both missing",
+			repository:     "",
+			password:       "",
+			expectErr:      true,
+			expectedErrMsg: "RESTIC_REPOSITORY", // Should fail on first check
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set or unset environment variables
+			if tt.repository == "" {
+				os.Unsetenv("RESTIC_REPOSITORY")
+			} else {
+				os.Setenv("RESTIC_REPOSITORY", tt.repository)
+			}
+			defer os.Unsetenv("RESTIC_REPOSITORY")
+
+			if tt.password == "" {
+				os.Unsetenv("RESTIC_PASSWORD")
+			} else {
+				os.Setenv("RESTIC_PASSWORD", tt.password)
+			}
+			defer os.Unsetenv("RESTIC_PASSWORD")
+
+			err := ValidateResticEnv()
+
+			if tt.expectErr {
+				if err == nil {
+					t.Error("ValidateResticEnv() expected error, got nil")
+					return
+				}
+				if tt.expectedErrMsg != "" && !strings.Contains(err.Error(), tt.expectedErrMsg) {
+					t.Errorf("ValidateResticEnv() error message should contain %q, got %q", tt.expectedErrMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("ValidateResticEnv() unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}

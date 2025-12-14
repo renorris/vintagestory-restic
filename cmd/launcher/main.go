@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/renorris/vintagestory-restic/internal/backup"
 	"github.com/renorris/vintagestory-restic/internal/downloader"
 	"github.com/renorris/vintagestory-restic/internal/server"
 )
@@ -45,6 +46,23 @@ func run() error {
 		cancel()
 	}()
 
+	// Load backup configuration
+	backupConfig, err := backup.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load backup config: %w", err)
+	}
+
+	if !backupConfig.Enabled {
+		fmt.Println("WARNING: BACKUP_INTERVAL not set. Periodic backups are disabled.")
+	} else {
+		fmt.Printf("Backups enabled with interval: %v\n", backupConfig.Interval)
+
+		// Validate that required restic environment variables are set
+		if err := backup.ValidateResticEnv(); err != nil {
+			return err
+		}
+	}
+
 	// Stage 1: Download server binaries if needed
 	if err := downloader.DoServerBinaryDownload(ctx, serverBinariesDir); err != nil {
 		if ctx.Err() != nil {
@@ -70,6 +88,33 @@ func run() error {
 	}
 
 	fmt.Printf("Server started with PID %d\n", srv.PID())
+
+	// Stage 3: Start backup manager if enabled
+	var backupManager *backup.Manager
+	if backupConfig.Enabled {
+		backupManager = &backup.Manager{
+			Interval:    backupConfig.Interval,
+			GameDataDir: "/gamedata",
+			Server:      srv,
+			OnBackupStart: func() {
+				fmt.Println("Starting periodic backup...")
+			},
+			OnBackupComplete: func(err error, duration time.Duration) {
+				if err != nil {
+					fmt.Printf("Backup failed after %v: %v\n", duration, err)
+				} else {
+					fmt.Printf("Backup completed successfully in %v\n", duration)
+				}
+			},
+		}
+
+		if err := backupManager.Start(ctx); err != nil {
+			fmt.Printf("WARNING: Failed to start backup manager: %v\n", err)
+		} else {
+			fmt.Println("Backup manager started.")
+			defer backupManager.Stop()
+		}
+	}
 
 	// Wait for either the server to exit or context cancellation (from signal)
 	select {
