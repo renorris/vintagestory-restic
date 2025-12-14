@@ -18,6 +18,10 @@ type Config struct {
 	// BackupOnServerStart indicates whether a backup should be performed
 	// immediately when the server finishes booting.
 	BackupOnServerStart bool
+
+	// PauseWhenNoPlayers indicates whether backups should be skipped when
+	// no players are online.
+	PauseWhenNoPlayers bool
 }
 
 // LoadConfig loads backup configuration from environment variables.
@@ -38,11 +42,13 @@ func LoadConfig() (*Config, error) {
 	}
 
 	backupOnStart := parseBoolEnv(os.Getenv("DO_BACKUP_ON_SERVER_START"))
+	pauseWhenNoPlayers := parseBoolEnv(os.Getenv("BACKUP_PAUSE_WHEN_NO_PLAYERS"))
 
 	return &Config{
 		Enabled:             true,
 		Interval:            interval,
 		BackupOnServerStart: backupOnStart,
+		PauseWhenNoPlayers:  pauseWhenNoPlayers,
 	}, nil
 }
 

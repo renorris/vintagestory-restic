@@ -59,6 +59,9 @@ func run() error {
 		if backupConfig.BackupOnServerStart {
 			fmt.Println("Backup on server start is enabled.")
 		}
+		if backupConfig.PauseWhenNoPlayers {
+			fmt.Println("Backups will pause when no players are online.")
+		}
 
 		// Validate that required restic environment variables are set
 		if err := backup.ValidateResticEnv(); err != nil {
@@ -75,46 +78,63 @@ func run() error {
 		return fmt.Errorf("failed to download server binaries: %w", err)
 	}
 
-	// Stage 2: Start the Vintage Story server
+	// Stage 2: Create player checker if needed (before server so we can wire up OnOutput)
+	var playerChecker *backup.PlayerChecker
+	if backupConfig.Enabled && backupConfig.PauseWhenNoPlayers {
+		playerChecker = &backup.PlayerChecker{}
+	}
+
+	// Stage 3: Start the Vintage Story server
 	srv := &server.Server{
 		WorkingDir: serverBinariesDir,
 		Args:       []string{"--dataPath", "/gamedata"},
 		OnOutput: func(line string) bool {
 			fmt.Println(line)
+			// Forward output to player checker if enabled
+			if playerChecker != nil {
+				playerChecker.HandleOutput(line)
+			}
 			return true
 		},
 	}
 
-	// Stage 3: Start backup manager if enabled (create before starting server so we can use OnBoot)
+	// Stage 4: Start backup manager if enabled (create before starting server so we can use OnBoot)
 	var backupManager *backup.Manager
 	if backupConfig.Enabled {
 		backupManager = &backup.Manager{
-			Interval:    backupConfig.Interval,
-			GameDataDir: "/gamedata",
-			Server:      srv,
-			BootChecker: srv,
+			Interval:           backupConfig.Interval,
+			GameDataDir:        "/gamedata",
+			Server:             srv,
+			BootChecker:        srv,
+			PlayerChecker:      playerChecker,
+			PauseWhenNoPlayers: backupConfig.PauseWhenNoPlayers,
 			OnBackupStart: func() {
 				fmt.Println("Starting backup...")
 			},
 			OnBackupComplete: func(err error, duration time.Duration) {
 				if err != nil {
-					fmt.Printf("Backup failed after %v: %v\n", duration, err)
+					if err == backup.ErrNoPlayersOnline {
+						fmt.Printf("Backup skipped: %v\n", err)
+					} else {
+						fmt.Printf("Backup failed after %v: %v\n", duration, err)
+					}
 				} else {
 					fmt.Printf("Backup completed successfully in %v\n", duration)
 				}
 			},
 		}
+	}
 
-		// Set up OnBoot callback for backup-on-start if configured
-		if backupConfig.BackupOnServerStart {
-			srv.OnBoot = func() {
-				fmt.Println("Server boot detected, triggering immediate backup...")
-				go func() {
-					if err := backupManager.RunBackupNow(ctx); err != nil {
-						fmt.Printf("Backup on server start failed: %v\n", err)
-					}
-				}()
-			}
+	// Set up OnBoot callback to optionally trigger backup-on-start
+	srv.OnBoot = func() {
+		// Trigger backup-on-start if configured
+		if backupConfig.Enabled && backupConfig.BackupOnServerStart {
+			fmt.Println("Triggering immediate backup...")
+			go func() {
+				if err := backupManager.RunBackupNow(ctx); err != nil {
+					fmt.Printf("Backup on server start failed: %v\n", err)
+				}
+			}()
 		}
 	}
 

@@ -227,6 +227,68 @@ func TestParseBoolEnv(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_PauseWhenNoPlayers(t *testing.T) {
+	tests := []struct {
+		name                     string
+		pauseEnv                 string
+		expectPauseWhenNoPlayers bool
+	}{
+		{
+			name:                     "not set",
+			pauseEnv:                 "",
+			expectPauseWhenNoPlayers: false,
+		},
+		{
+			name:                     "true",
+			pauseEnv:                 "true",
+			expectPauseWhenNoPlayers: true,
+		},
+		{
+			name:                     "1",
+			pauseEnv:                 "1",
+			expectPauseWhenNoPlayers: true,
+		},
+		{
+			name:                     "yes",
+			pauseEnv:                 "yes",
+			expectPauseWhenNoPlayers: true,
+		},
+		{
+			name:                     "false",
+			pauseEnv:                 "false",
+			expectPauseWhenNoPlayers: false,
+		},
+		{
+			name:                     "0",
+			pauseEnv:                 "0",
+			expectPauseWhenNoPlayers: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Setenv("BACKUP_INTERVAL", "1h")
+			defer os.Unsetenv("BACKUP_INTERVAL")
+
+			if tt.pauseEnv == "" {
+				os.Unsetenv("BACKUP_PAUSE_WHEN_NO_PLAYERS")
+			} else {
+				os.Setenv("BACKUP_PAUSE_WHEN_NO_PLAYERS", tt.pauseEnv)
+			}
+			defer os.Unsetenv("BACKUP_PAUSE_WHEN_NO_PLAYERS")
+
+			config, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig() unexpected error: %v", err)
+			}
+
+			if config.PauseWhenNoPlayers != tt.expectPauseWhenNoPlayers {
+				t.Errorf("LoadConfig().PauseWhenNoPlayers = %v, want %v", config.PauseWhenNoPlayers, tt.expectPauseWhenNoPlayers)
+			}
+		})
+	}
+}
+
 func TestValidateResticEnv(t *testing.T) {
 	tests := []struct {
 		name           string

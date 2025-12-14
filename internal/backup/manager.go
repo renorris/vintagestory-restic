@@ -41,6 +41,18 @@ type ResticRunner func(ctx context.Context, stagingDir string) error
 // Returns the exit code and any error.
 type CommandRunner func(ctx context.Context, name string, args ...string) (exitCode int, err error)
 
+// PlayerCheckerInterface is an interface for checking if players are online.
+// This allows for testing without a real player checker.
+type PlayerCheckerInterface interface {
+	// ShouldBackup returns true if a backup should run based on player status.
+	// It returns true if players are currently online, OR if players were
+	// online at the last check but are now all offline (final backup).
+	ShouldBackup() bool
+}
+
+// ErrNoPlayersOnline is returned when a backup is skipped because no players are online.
+var ErrNoPlayersOnline = fmt.Errorf("no players online, backup skipped")
+
 // Manager handles periodic backups of the Vintage Story server.
 type Manager struct {
 	// Interval is the time between backups.
@@ -60,6 +72,13 @@ type Manager struct {
 	// If set, backups will only run after the server has booted.
 	// If nil, the boot check is skipped.
 	BootChecker BootChecker
+
+	// PlayerChecker is used to check if players are online.
+	// If set and PauseWhenNoPlayers is true, backups will only run when players are online.
+	PlayerChecker PlayerCheckerInterface
+
+	// PauseWhenNoPlayers indicates whether backups should be skipped when no players are online.
+	PauseWhenNoPlayers bool
 
 	// OnBackupStart is called when a backup starts. Optional.
 	OnBackupStart func()
@@ -193,9 +212,18 @@ func (m *Manager) runBackup(ctx context.Context) {
 
 // performBackup executes the full backup workflow.
 func (m *Manager) performBackup(ctx context.Context) error {
-	// Step 0: Check if server has booted (if BootChecker is configured)
+	// Step 0a: Check if server has booted (if BootChecker is configured)
 	if m.BootChecker != nil && !m.BootChecker.HasBooted() {
 		return ErrServerNotBooted
+	}
+
+	// Step 0b: Check if backup should run based on player status
+	// ShouldBackup() returns true if players are online, OR if players
+	// were online previously but have now all logged off (final backup).
+	if m.PauseWhenNoPlayers && m.PlayerChecker != nil {
+		if !m.PlayerChecker.ShouldBackup() {
+			return ErrNoPlayersOnline
+		}
 	}
 
 	// Step 1: Get the save file name from serverconfig.json
