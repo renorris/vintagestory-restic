@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -98,13 +99,24 @@ func run() error {
 		},
 	}
 
-	// Stage 4: Start backup manager if enabled (create before starting server so we can use OnBoot)
+	// Stage 4: Create the command queue for rate-limited command submission
+	// This ensures a minimum 100ms delay between all commands sent to the server
+	cmdQueue := &server.CommandQueue{
+		Sender: srv,
+		OnError: func(cmd string, err error) {
+			if err != nil {
+				fmt.Printf("Failed to send command %q: %v\n", cmd, err)
+			}
+		},
+	}
+
+	// Stage 5: Start backup manager if enabled (create before starting server so we can use OnBoot)
 	var backupManager *backup.Manager
 	if backupConfig.Enabled {
 		backupManager = &backup.Manager{
 			Interval:           backupConfig.Interval,
 			GameDataDir:        "/gamedata",
-			Server:             srv,
+			Server:             cmdQueue, // Use the command queue for rate-limited commands
 			BootChecker:        srv,
 			PlayerChecker:      playerChecker,
 			PauseWhenNoPlayers: backupConfig.PauseWhenNoPlayers,
@@ -145,6 +157,10 @@ func run() error {
 
 	fmt.Printf("Server started with PID %d\n", srv.PID())
 
+	// Start the command queue now that the server is running
+	cmdQueue.Start()
+	defer cmdQueue.Stop()
+
 	// Start the backup manager after the server has started
 	if backupManager != nil {
 		if err := backupManager.Start(ctx); err != nil {
@@ -154,6 +170,9 @@ func run() error {
 			defer backupManager.Stop()
 		}
 	}
+
+	// Start goroutine to read commands from stdin and pipe them to the server
+	go readStdinCommands(ctx, cmdQueue)
 
 	// Wait for either the server to exit or context cancellation (from signal)
 	select {
@@ -188,6 +207,35 @@ func run() error {
 			<-srv.Done() // Wait for process to actually terminate
 			fmt.Println("Server killed.")
 			return nil
+		}
+	}
+}
+
+// readStdinCommands reads commands from stdin and submits them to the command queue.
+// This allows users to send commands directly to the Vintage Story server.
+func readStdinCommands(ctx context.Context, cmdQueue *server.CommandQueue) {
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Note: scanner.Scan() blocks, but that's okay since we're in a goroutine.
+		// When the context is cancelled and the process exits, this goroutine
+		// will be terminated along with the process.
+		if scanner.Scan() {
+			line := scanner.Text()
+			if line != "" {
+				cmdQueue.Submit(line)
+			}
+		} else {
+			// EOF or error - stop reading
+			if err := scanner.Err(); err != nil {
+				fmt.Printf("Error reading stdin: %v\n", err)
+			}
+			return
 		}
 	}
 }

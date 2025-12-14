@@ -15,12 +15,9 @@ import (
 
 // mockServer implements ServerCommander for testing.
 type mockServer struct {
-	mu          sync.Mutex
-	commands    []string
-	onCommand   func(cmd string) error
-	waitPattern string
-	waitResult  string
-	waitErr     error
+	mu        sync.Mutex
+	commands  []string
+	onCommand func(cmd string) error
 }
 
 // mockBootChecker implements BootChecker for testing.
@@ -49,19 +46,6 @@ func (m *mockServer) SendCommand(cmd string) error {
 		return m.onCommand(cmd)
 	}
 	return nil
-}
-
-func (m *mockServer) WaitForPattern(ctx context.Context, pattern string) (string, error) {
-	m.mu.Lock()
-	m.waitPattern = pattern
-	result := m.waitResult
-	err := m.waitErr
-	m.mu.Unlock()
-
-	if err != nil {
-		return "", err
-	}
-	return result, nil
 }
 
 func (m *mockServer) getCommands() []string {

@@ -15,11 +15,11 @@ import (
 	"github.com/renorris/vintagestory-restic/internal/server"
 )
 
-// ServerCommander is an interface for sending commands to and receiving output from the server.
-// This allows for testing without a real server.
+// ServerCommander is an interface for sending commands to the server.
+// This allows for testing without a real server, and for using a rate-limited
+// command queue that wraps the server.
 type ServerCommander interface {
 	SendCommand(cmd string) error
-	WaitForPattern(ctx context.Context, pattern string) (string, error)
 }
 
 // BootChecker is an interface for checking if the server has fully booted.
