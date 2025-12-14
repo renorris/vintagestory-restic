@@ -20,15 +20,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM alpine:3.23
 
 # Install .NET 8 runtime
-
 RUN apk add --no-cache aspnetcore8-runtime
 
-WORKDIR /gamedata
-
 # Config nonroot user
-RUN addgroup -g 2001 -S vsgroup && \
+RUN mkdir /gamedata /serverbinaries && \
+    addgroup -g 2001 -S vsgroup && \
     adduser -u 2001 -S -G vsgroup vsuser && \
-    chown -R vsuser:vsgroup /gamedata
+    chown -R vsuser:vsgroup /gamedata /serverbinaries
 
 # Copy launcher binary
 COPY --chown=vsuser:vsgroup --from=launcher-builder /build/vintagestory-launcher /usr/local/bin
