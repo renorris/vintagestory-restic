@@ -114,12 +114,13 @@ func run() error {
 	var backupManager *backup.Manager
 	if backupConfig.Enabled {
 		backupManager = &backup.Manager{
-			Interval:           backupConfig.Interval,
-			GameDataDir:        "/gamedata",
-			Server:             cmdQueue, // Use the command queue for rate-limited commands
-			BootChecker:        srv,
-			PlayerChecker:      playerChecker,
-			PauseWhenNoPlayers: backupConfig.PauseWhenNoPlayers,
+			Interval:               backupConfig.Interval,
+			GameDataDir:            "/gamedata",
+			Server:                 cmdQueue, // Use the command queue for rate-limited commands
+			BootChecker:            srv,
+			BackupCompletionWaiter: srv, // Wait for "[Server Notification] Backup complete!" before vacuuming
+			PlayerChecker:          playerChecker,
+			PauseWhenNoPlayers:     backupConfig.PauseWhenNoPlayers,
 			OnBackupStart: func() {
 				fmt.Println("Starting backup...")
 			},

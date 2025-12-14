@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -370,9 +369,13 @@ func TestManager_CreateStagingDirectory(t *testing.T) {
 		Server:      &mockServer{},
 		GameDataDir: gameDataDir,
 		StagingDir:  stagingDir,
-		// Mock VACUUM to just copy the file (simulates what VACUUM INTO does)
-		SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-			return copyFileRegular(srcPath, dstPath)
+		// Mock VCDBTreeSplitter to create a marker file (simulates vcdbtree.Split)
+		VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			// Create the vcdbtree structure with a marker file
+			if err := os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
 		},
 	}
 
@@ -397,24 +400,21 @@ func TestManager_CreateStagingDirectory(t *testing.T) {
 		}
 	}
 
-	// Verify the save file exists with correct name
-	saveFile := filepath.Join(stagingDir, "Saves", "default.vcdbs")
-	if _, err := os.Stat(saveFile); os.IsNotExist(err) {
-		t.Error("Expected save file to exist in staging")
+	// Verify the vcdbtree save directory exists (saveFileName without .vcdbs becomes directory name)
+	vcdbtreeDir := filepath.Join(stagingDir, "Saves", "default")
+	if _, err := os.Stat(vcdbtreeDir); os.IsNotExist(err) {
+		t.Error("Expected vcdbtree save directory to exist in staging")
 	}
 
-	// Verify content was vacuumed (copied) to staging
-	content, err := os.ReadFile(saveFile)
-	if err != nil {
-		t.Fatalf("Failed to read save file: %v", err)
-	}
-	if string(content) != "backup data" {
-		t.Errorf("Save file content = %q, want %q", string(content), "backup data")
+	// Verify the vcdbtree structure was created (gamedata dir with marker file)
+	gamedataMarker := filepath.Join(vcdbtreeDir, "gamedata", "1.bin")
+	if _, err := os.Stat(gamedataMarker); os.IsNotExist(err) {
+		t.Error("Expected vcdbtree gamedata marker to exist")
 	}
 
-	// Verify the original backup file was removed after vacuum
+	// Verify the original backup file was removed after split
 	if _, err := os.Stat(backupFile); !os.IsNotExist(err) {
-		t.Error("Expected original backup file to be removed after vacuum")
+		t.Error("Expected original backup file to be removed after split")
 	}
 }
 
@@ -769,9 +769,10 @@ func TestManager_PerformBackup_CleansUpBackupFile(t *testing.T) {
 		ResticRunner: func(ctx context.Context, stagingDir string) error {
 			return nil
 		},
-		// Mock VACUUM to copy the file
-		SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-			return copyFileRegular(srcPath, dstPath)
+		// Mock VCDBTreeSplitter to create marker files
+		VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+			return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
 		},
 	}
 
@@ -826,9 +827,10 @@ func TestManager_PerformBackup_CleansUpStagingOnResticFailure(t *testing.T) {
 		ResticRunner: func(ctx context.Context, stagingDir string) error {
 			return fmt.Errorf("simulated restic failure")
 		},
-		// Mock VACUUM to copy the file
-		SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-			return copyFileRegular(srcPath, dstPath)
+		// Mock VCDBTreeSplitter to create marker files
+		VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+			return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
 		},
 	}
 
@@ -909,8 +911,9 @@ func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-				return copyFileRegular(srcPath, dstPath)
+			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
 			},
 		}
 
@@ -955,8 +958,9 @@ func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-				return copyFileRegular(srcPath, dstPath)
+			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
 			},
 		}
 
@@ -981,6 +985,66 @@ func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
 type mockPlayerChecker struct {
 	mu           sync.Mutex
 	shouldBackup bool
+}
+
+// mockBackupCompletionWaiter implements BackupCompletionWaiter for testing.
+type mockBackupCompletionWaiter struct {
+	mu            sync.Mutex
+	waitError     error
+	waitCalled    bool
+	waitDelay     time.Duration
+	waitCompleted chan struct{}
+}
+
+func (m *mockBackupCompletionWaiter) WaitForBackupComplete(ctx context.Context) error {
+	m.mu.Lock()
+	m.waitCalled = true
+	delay := m.waitDelay
+	err := m.waitError
+	completedCh := m.waitCompleted
+	m.mu.Unlock()
+
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	if completedCh != nil {
+		select {
+		case <-completedCh:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return err
+}
+
+func (m *mockBackupCompletionWaiter) WasCalled() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.waitCalled
+}
+
+func (m *mockBackupCompletionWaiter) SetError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.waitError = err
+}
+
+func (m *mockBackupCompletionWaiter) SetDelay(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.waitDelay = d
+}
+
+func (m *mockBackupCompletionWaiter) SetWaitCompleted(ch chan struct{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.waitCompleted = ch
 }
 
 func (m *mockPlayerChecker) ShouldBackup() bool {
@@ -1049,8 +1113,9 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-				return copyFileRegular(srcPath, dstPath)
+			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
 			},
 		}
 
@@ -1101,8 +1166,9 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-				return copyFileRegular(srcPath, dstPath)
+			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
 			},
 		}
 
@@ -1151,8 +1217,9 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-				return copyFileRegular(srcPath, dstPath)
+			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
 			},
 		}
 
@@ -1202,8 +1269,9 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-				return copyFileRegular(srcPath, dstPath)
+			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
 			},
 		}
 
@@ -1378,122 +1446,57 @@ func TestManager_RunCommandWithOutput(t *testing.T) {
 	}
 }
 
-func TestManager_VacuumDatabase(t *testing.T) {
-	t.Run("successful vacuum with real sqlite3", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		srcPath := filepath.Join(tmpDir, "source.db")
-		dstPath := filepath.Join(tmpDir, "dest.db")
-
-		// Create a simple SQLite database
-		// We'll use the sqlite3 command to create it
-		cmd := exec.Command("sqlite3", srcPath, "CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT); INSERT INTO test VALUES (1, 'hello');")
-		if err := cmd.Run(); err != nil {
-			t.Skipf("sqlite3 not available: %v", err)
-		}
-
-		m := &Manager{
-			Interval: time.Second,
-			Server:   &mockServer{},
-		}
-
-		ctx := context.Background()
-		err := m.vacuumDatabase(ctx, srcPath, dstPath)
-		if err != nil {
-			t.Fatalf("vacuumDatabase() failed: %v", err)
-		}
-
-		// Verify the destination file exists
-		if _, err := os.Stat(dstPath); os.IsNotExist(err) {
-			t.Error("destination file should exist after vacuum")
-		}
-
-		// Verify the destination file is a valid SQLite database with our data
-		output, err := exec.Command("sqlite3", dstPath, "SELECT name FROM test WHERE id=1;").Output()
-		if err != nil {
-			t.Fatalf("failed to query vacuumed database: %v", err)
-		}
-		if strings.TrimSpace(string(output)) != "hello" {
-			t.Errorf("vacuumed database content = %q, want %q", strings.TrimSpace(string(output)), "hello")
-		}
-	})
-
-	t.Run("uses custom SQLiteVacuumRunner when provided", func(t *testing.T) {
-		var runnerCalled bool
+func TestManager_SplitToVCDBTree(t *testing.T) {
+	t.Run("uses custom VCDBTreeSplitter when provided", func(t *testing.T) {
+		var splitterCalled bool
 		var capturedSrc, capturedDst string
 
 		m := &Manager{
 			Interval: time.Second,
 			Server:   &mockServer{},
-			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-				runnerCalled = true
+			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+				splitterCalled = true
 				capturedSrc = srcPath
-				capturedDst = dstPath
+				capturedDst = dstDir
 				return nil
 			},
 		}
 
-		ctx := context.Background()
-		err := m.vacuumDatabase(ctx, "/src/path.db", "/dst/path.db")
+		err := m.splitToVCDBTree("/src/path.vcdbs", "/dst/path")
 		if err != nil {
-			t.Fatalf("vacuumDatabase() failed: %v", err)
+			t.Fatalf("splitToVCDBTree() failed: %v", err)
 		}
 
-		if !runnerCalled {
-			t.Error("custom SQLiteVacuumRunner should have been called")
+		if !splitterCalled {
+			t.Error("custom VCDBTreeSplitter should have been called")
 		}
-		if capturedSrc != "/src/path.db" {
-			t.Errorf("srcPath = %q, want %q", capturedSrc, "/src/path.db")
+		if capturedSrc != "/src/path.vcdbs" {
+			t.Errorf("srcPath = %q, want %q", capturedSrc, "/src/path.vcdbs")
 		}
-		if capturedDst != "/dst/path.db" {
-			t.Errorf("dstPath = %q, want %q", capturedDst, "/dst/path.db")
+		if capturedDst != "/dst/path" {
+			t.Errorf("dstDir = %q, want %q", capturedDst, "/dst/path")
 		}
 	})
 
-	t.Run("returns error from custom SQLiteVacuumRunner", func(t *testing.T) {
-		expectedErr := fmt.Errorf("simulated vacuum failure")
+	t.Run("returns error from custom VCDBTreeSplitter", func(t *testing.T) {
+		expectedErr := fmt.Errorf("simulated split failure")
 
 		m := &Manager{
 			Interval: time.Second,
 			Server:   &mockServer{},
-			SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
+			VCDBTreeSplitter: func(srcPath, dstDir string) error {
 				return expectedErr
 			},
 		}
 
-		ctx := context.Background()
-		err := m.vacuumDatabase(ctx, "/src/path.db", "/dst/path.db")
+		err := m.splitToVCDBTree("/src/path.vcdbs", "/dst/path")
 		if err != expectedErr {
-			t.Errorf("vacuumDatabase() error = %v, want %v", err, expectedErr)
-		}
-	})
-
-	t.Run("fails with invalid destination path", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		srcPath := filepath.Join(tmpDir, "source.db")
-
-		// Create a simple SQLite database
-		cmd := exec.Command("sqlite3", srcPath, "CREATE TABLE test (id INTEGER);")
-		if err := cmd.Run(); err != nil {
-			t.Skipf("sqlite3 not available: %v", err)
-		}
-
-		// Destination in a non-existent directory should fail
-		dstPath := filepath.Join(tmpDir, "nonexistent", "subdir", "dest.db")
-
-		m := &Manager{
-			Interval: time.Second,
-			Server:   &mockServer{},
-		}
-
-		ctx := context.Background()
-		err := m.vacuumDatabase(ctx, srcPath, dstPath)
-		if err == nil {
-			t.Error("vacuumDatabase() expected error for invalid destination path")
+			t.Errorf("splitToVCDBTree() error = %v, want %v", err, expectedErr)
 		}
 	})
 }
 
-func TestManager_CreateStagingDirectory_VacuumsBackupFile(t *testing.T) {
+func TestManager_CreateStagingDirectory_SplitsToVCDBTree(t *testing.T) {
 	// Create game data directory with test content
 	gameDataDir := t.TempDir()
 	stagingDir := t.TempDir()
@@ -1515,20 +1518,21 @@ func TestManager_CreateStagingDirectory_VacuumsBackupFile(t *testing.T) {
 		t.Fatalf("Failed to write backup file: %v", err)
 	}
 
-	var vacuumCalled bool
-	var vacuumSrc, vacuumDst string
+	var splitterCalled bool
+	var splitterSrc, splitterDst string
 
 	m := &Manager{
 		Interval:    time.Second,
 		Server:      &mockServer{},
 		GameDataDir: gameDataDir,
 		StagingDir:  stagingDir,
-		SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-			vacuumCalled = true
-			vacuumSrc = srcPath
-			vacuumDst = dstPath
-			// Simulate VACUUM by copying the file
-			return copyFileRegular(srcPath, dstPath)
+		VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			splitterCalled = true
+			splitterSrc = srcPath
+			splitterDst = dstDir
+			// Create a marker file to simulate vcdbtree split
+			os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+			return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
 		},
 	}
 
@@ -1537,32 +1541,33 @@ func TestManager_CreateStagingDirectory_VacuumsBackupFile(t *testing.T) {
 		t.Fatalf("createStagingDirectory() failed: %v", err)
 	}
 
-	// Verify vacuum was called
-	if !vacuumCalled {
-		t.Error("SQLiteVacuumRunner should have been called")
+	// Verify splitter was called
+	if !splitterCalled {
+		t.Error("VCDBTreeSplitter should have been called")
 	}
 
-	// Verify vacuum was called with correct paths
-	if vacuumSrc != backupFile {
-		t.Errorf("vacuum srcPath = %q, want %q", vacuumSrc, backupFile)
+	// Verify splitter was called with correct paths
+	if splitterSrc != backupFile {
+		t.Errorf("splitter srcPath = %q, want %q", splitterSrc, backupFile)
 	}
-	expectedDst := filepath.Join(stagingDir, "Saves", "default.vcdbs")
-	if vacuumDst != expectedDst {
-		t.Errorf("vacuum dstPath = %q, want %q", vacuumDst, expectedDst)
+	// The save directory should be named after the save file (without .vcdbs extension)
+	expectedDst := filepath.Join(stagingDir, "Saves", "default")
+	if splitterDst != expectedDst {
+		t.Errorf("splitter dstDir = %q, want %q", splitterDst, expectedDst)
 	}
 
-	// Verify the vacuumed file exists in staging
+	// Verify the vcdbtree directory exists in staging
 	if _, err := os.Stat(expectedDst); os.IsNotExist(err) {
-		t.Error("Expected vacuumed save file to exist in staging")
+		t.Error("Expected vcdbtree save directory to exist in staging")
 	}
 
 	// Verify the original backup file was removed
 	if _, err := os.Stat(backupFile); !os.IsNotExist(err) {
-		t.Error("Expected original backup file to be removed after vacuum")
+		t.Error("Expected original backup file to be removed after split")
 	}
 }
 
-func TestManager_CreateStagingDirectory_VacuumFailure(t *testing.T) {
+func TestManager_CreateStagingDirectory_SplitFailure(t *testing.T) {
 	gameDataDir := t.TempDir()
 	stagingDir := t.TempDir()
 	backupsDir := filepath.Join(gameDataDir, "Backups")
@@ -1580,23 +1585,23 @@ func TestManager_CreateStagingDirectory_VacuumFailure(t *testing.T) {
 		Server:      &mockServer{},
 		GameDataDir: gameDataDir,
 		StagingDir:  stagingDir,
-		SQLiteVacuumRunner: func(ctx context.Context, srcPath, dstPath string) error {
-			return fmt.Errorf("simulated vacuum failure")
+		VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			return fmt.Errorf("simulated split failure")
 		},
 	}
 
 	err := m.createStagingDirectory(backupFile, "default.vcdbs")
 	if err == nil {
-		t.Error("createStagingDirectory() expected error when vacuum fails")
+		t.Error("createStagingDirectory() expected error when split fails")
 	}
 
-	if !strings.Contains(err.Error(), "vacuum") {
-		t.Errorf("error should mention vacuum: %v", err)
+	if !strings.Contains(err.Error(), "vcdbtree") {
+		t.Errorf("error should mention vcdbtree: %v", err)
 	}
 
-	// The original backup file should still exist since vacuum failed
+	// The original backup file should still exist since split failed
 	if _, err := os.Stat(backupFile); os.IsNotExist(err) {
-		t.Error("Original backup file should still exist when vacuum fails")
+		t.Error("Original backup file should still exist when split fails")
 	}
 }
 
@@ -1635,6 +1640,266 @@ func TestManager_RunBackup_BootCheckGuard(t *testing.T) {
 
 		if completeErr != ErrServerNotBooted {
 			t.Errorf("OnBackupComplete error = %v, want ErrServerNotBooted", completeErr)
+		}
+	})
+}
+
+func TestManager_WaitForBackupFile_WaitsForBackupCompletionNotification(t *testing.T) {
+	t.Run("waits for backup completion before checking file", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+		stagingDir := t.TempDir()
+		backupsDir := filepath.Join(gameDataDir, "Backups")
+		os.MkdirAll(backupsDir, 0755)
+
+		// Create serverconfig.json
+		config := map[string]interface{}{
+			"WorldConfig": map[string]interface{}{
+				"SaveFileLocation": "/gamedata/Saves/test.vcdbs",
+			},
+		}
+		configData, _ := json.Marshal(config)
+		os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), configData, 0644)
+
+		completionWaiter := &mockBackupCompletionWaiter{}
+		bootChecker := &mockBootChecker{hasBooted: true}
+
+		m := &Manager{
+			Interval:               time.Second,
+			Server:                 &mockServer{},
+			BootChecker:            bootChecker,
+			BackupCompletionWaiter: completionWaiter,
+			GameDataDir:            gameDataDir,
+			StagingDir:             stagingDir,
+			BackupTimeout:          2 * time.Second,
+			ResticRunner: func(ctx context.Context, stagingDir string) error {
+				return nil
+			},
+			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+			},
+		}
+
+		// Create a backup file that will be found
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			backupFile := filepath.Join(backupsDir, "backup.vcdbs")
+			os.WriteFile(backupFile, []byte("backup data"), 0644)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := m.performBackup(ctx)
+		if err != nil {
+			t.Errorf("performBackup() unexpected error: %v", err)
+		}
+
+		// Verify that WaitForBackupComplete was called
+		if !completionWaiter.WasCalled() {
+			t.Error("Expected BackupCompletionWaiter.WaitForBackupComplete to be called")
+		}
+	})
+
+	t.Run("fails if backup completion wait times out", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+		backupsDir := filepath.Join(gameDataDir, "Backups")
+		os.MkdirAll(backupsDir, 0755)
+
+		// Create serverconfig.json
+		config := map[string]interface{}{
+			"WorldConfig": map[string]interface{}{
+				"SaveFileLocation": "/gamedata/Saves/test.vcdbs",
+			},
+		}
+		configData, _ := json.Marshal(config)
+		os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), configData, 0644)
+
+		// Waiter that will block until cancelled
+		waitCompleted := make(chan struct{})
+		completionWaiter := &mockBackupCompletionWaiter{}
+		completionWaiter.SetWaitCompleted(waitCompleted)
+		bootChecker := &mockBootChecker{hasBooted: true}
+
+		m := &Manager{
+			Interval:               time.Second,
+			Server:                 &mockServer{},
+			BootChecker:            bootChecker,
+			BackupCompletionWaiter: completionWaiter,
+			GameDataDir:            gameDataDir,
+			BackupTimeout:          300 * time.Millisecond, // Short timeout
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := m.performBackup(ctx)
+		if err == nil {
+			t.Error("Expected error when backup completion wait times out")
+		}
+
+		if !strings.Contains(err.Error(), "backup completion") {
+			t.Errorf("Expected error to mention backup completion, got: %v", err)
+		}
+	})
+
+	t.Run("fails if backup completion waiter returns error", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+		backupsDir := filepath.Join(gameDataDir, "Backups")
+		os.MkdirAll(backupsDir, 0755)
+
+		// Create serverconfig.json
+		config := map[string]interface{}{
+			"WorldConfig": map[string]interface{}{
+				"SaveFileLocation": "/gamedata/Saves/test.vcdbs",
+			},
+		}
+		configData, _ := json.Marshal(config)
+		os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), configData, 0644)
+
+		completionWaiter := &mockBackupCompletionWaiter{}
+		completionWaiter.SetError(fmt.Errorf("server exited unexpectedly"))
+		bootChecker := &mockBootChecker{hasBooted: true}
+
+		m := &Manager{
+			Interval:               time.Second,
+			Server:                 &mockServer{},
+			BootChecker:            bootChecker,
+			BackupCompletionWaiter: completionWaiter,
+			GameDataDir:            gameDataDir,
+			BackupTimeout:          2 * time.Second,
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := m.performBackup(ctx)
+		if err == nil {
+			t.Error("Expected error when backup completion waiter returns error")
+		}
+
+		if !strings.Contains(err.Error(), "backup completion") {
+			t.Errorf("Expected error to mention backup completion, got: %v", err)
+		}
+	})
+
+	t.Run("proceeds without waiter when BackupCompletionWaiter is nil", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+		stagingDir := t.TempDir()
+		backupsDir := filepath.Join(gameDataDir, "Backups")
+		os.MkdirAll(backupsDir, 0755)
+
+		// Create serverconfig.json
+		config := map[string]interface{}{
+			"WorldConfig": map[string]interface{}{
+				"SaveFileLocation": "/gamedata/Saves/test.vcdbs",
+			},
+		}
+		configData, _ := json.Marshal(config)
+		os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), configData, 0644)
+
+		bootChecker := &mockBootChecker{hasBooted: true}
+
+		m := &Manager{
+			Interval:               time.Second,
+			Server:                 &mockServer{},
+			BootChecker:            bootChecker,
+			BackupCompletionWaiter: nil, // No waiter configured
+			GameDataDir:            gameDataDir,
+			StagingDir:             stagingDir,
+			BackupTimeout:          2 * time.Second,
+			ResticRunner: func(ctx context.Context, stagingDir string) error {
+				return nil
+			},
+			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+			},
+		}
+
+		// Create a backup file that will be found
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			backupFile := filepath.Join(backupsDir, "backup.vcdbs")
+			os.WriteFile(backupFile, []byte("backup data"), 0644)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := m.performBackup(ctx)
+		if err != nil {
+			t.Errorf("performBackup() unexpected error: %v", err)
+		}
+	})
+
+	t.Run("waiter is called before split attempt", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+		stagingDir := t.TempDir()
+		backupsDir := filepath.Join(gameDataDir, "Backups")
+		os.MkdirAll(backupsDir, 0755)
+
+		// Create serverconfig.json
+		config := map[string]interface{}{
+			"WorldConfig": map[string]interface{}{
+				"SaveFileLocation": "/gamedata/Saves/test.vcdbs",
+			},
+		}
+		configData, _ := json.Marshal(config)
+		os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), configData, 0644)
+
+		var mu sync.Mutex
+		var order []string
+
+		completionWaiter := &mockBackupCompletionWaiter{}
+		bootChecker := &mockBootChecker{hasBooted: true}
+
+		m := &Manager{
+			Interval:               time.Second,
+			Server:                 &mockServer{},
+			BootChecker:            bootChecker,
+			BackupCompletionWaiter: completionWaiter,
+			GameDataDir:            gameDataDir,
+			StagingDir:             stagingDir,
+			BackupTimeout:          2 * time.Second,
+			ResticRunner: func(ctx context.Context, stagingDir string) error {
+				return nil
+			},
+			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+				mu.Lock()
+				order = append(order, "split")
+				mu.Unlock()
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+			},
+		}
+
+		// Create backup file after a short delay (after beforeGenbackup timestamp is recorded)
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			backupFile := filepath.Join(backupsDir, "backup.vcdbs")
+			os.WriteFile(backupFile, []byte("backup data"), 0644)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := m.performBackup(ctx)
+		if err != nil {
+			t.Errorf("performBackup() unexpected error: %v", err)
+		}
+
+		// Verify waiter was called
+		if !completionWaiter.WasCalled() {
+			t.Error("Expected BackupCompletionWaiter.WaitForBackupComplete to be called")
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		// Verify split was called after waiter completed
+		if len(order) == 0 || order[0] != "split" {
+			t.Error("Expected split to be called after waiter completed")
 		}
 	})
 }

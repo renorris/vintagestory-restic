@@ -1154,3 +1154,182 @@ sleep 0.2
 		t.Error("Expected HasBooted() to remain true after server exit")
 	}
 }
+
+// TestServer_WaitForBackupComplete tests the WaitForBackupComplete method.
+func TestServer_WaitForBackupComplete(t *testing.T) {
+	t.Run("matches exact suffix", func(t *testing.T) {
+		scriptDir := t.TempDir()
+		scriptPath := filepath.Join(scriptDir, "backup_complete.sh")
+		scriptContent := `#!/bin/sh
+echo "14.12.2025 22:33:23 [Server Notification] Handling Console Command /genbackup"
+sleep 0.1
+echo "14.12.2025 22:33:23 [Server Notification] Ok, generating backup, this might take a while"
+sleep 0.1
+echo "14.12.2025 22:33:24 [Server Notification] Backup complete!"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to write script: %v", err)
+		}
+
+		s := &Server{
+			ServerPath: "/bin/sh",
+			Args:       []string{scriptPath},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+
+		err := s.WaitForBackupComplete(ctx)
+		if err != nil {
+			t.Errorf("WaitForBackupComplete failed: %v", err)
+		}
+	})
+
+	t.Run("uses HasSuffix not Contains", func(t *testing.T) {
+		scriptDir := t.TempDir()
+		scriptPath := filepath.Join(scriptDir, "backup_suffix.sh")
+		// This line contains the pattern but not as a suffix - should NOT match
+		scriptContent := `#!/bin/sh
+echo "[Server Notification] Backup complete! (extra text)"
+sleep 0.5
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to write script: %v", err)
+		}
+
+		s := &Server{
+			ServerPath: "/bin/sh",
+			Args:       []string{scriptPath},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+
+		// Use a short timeout - should time out since pattern is not a suffix
+		shortCtx, shortCancel := context.WithTimeout(ctx, 400*time.Millisecond)
+		defer shortCancel()
+
+		err := s.WaitForBackupComplete(shortCtx)
+		if err != ErrPatternTimeout {
+			t.Errorf("Expected ErrPatternTimeout because pattern is not a suffix, got: %v", err)
+		}
+	})
+
+	t.Run("timeout when pattern not found", func(t *testing.T) {
+		scriptDir := t.TempDir()
+		scriptPath := filepath.Join(scriptDir, "no_backup.sh")
+		scriptContent := `#!/bin/sh
+echo "some other output"
+sleep 2
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to write script: %v", err)
+		}
+
+		s := &Server{
+			ServerPath: "/bin/sh",
+			Args:       []string{scriptPath},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+
+		shortCtx, shortCancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		defer shortCancel()
+
+		err := s.WaitForBackupComplete(shortCtx)
+		if err != ErrPatternTimeout {
+			t.Errorf("Expected ErrPatternTimeout, got: %v", err)
+		}
+	})
+
+	t.Run("server exits before match", func(t *testing.T) {
+		scriptDir := t.TempDir()
+		scriptPath := filepath.Join(scriptDir, "quick_exit.sh")
+		scriptContent := `#!/bin/sh
+echo "starting"
+echo "exiting"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to write script: %v", err)
+		}
+
+		s := &Server{
+			ServerPath: "/bin/sh",
+			Args:       []string{scriptPath},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+
+		err := s.WaitForBackupComplete(ctx)
+		if err != ErrServerExited {
+			t.Errorf("Expected ErrServerExited, got: %v", err)
+		}
+	})
+
+	t.Run("not running", func(t *testing.T) {
+		s := &Server{
+			ServerPath: "echo",
+			Args:       []string{"quick"},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+
+		<-s.Done()
+
+		err := s.WaitForBackupComplete(ctx)
+		if err != ErrServerNotRunning {
+			t.Errorf("Expected ErrServerNotRunning, got: %v", err)
+		}
+	})
+
+	t.Run("matches with timestamp prefix", func(t *testing.T) {
+		scriptDir := t.TempDir()
+		scriptPath := filepath.Join(scriptDir, "backup_timestamp.sh")
+		scriptContent := `#!/bin/sh
+echo "14.12.2025 22:33:24 [Server Notification] Backup complete!"
+`
+		if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+			t.Fatalf("Failed to write script: %v", err)
+		}
+
+		s := &Server{
+			ServerPath: "/bin/sh",
+			Args:       []string{scriptPath},
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		if err := s.Start(ctx); err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+
+		err := s.WaitForBackupComplete(ctx)
+		if err != nil {
+			t.Errorf("WaitForBackupComplete should match line with timestamp prefix: %v", err)
+		}
+	})
+}

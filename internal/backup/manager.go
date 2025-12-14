@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/renorris/vintagestory-restic/internal/server"
+	"github.com/renorris/vintagestory-restic/internal/vcdbtree"
 )
 
 // ServerCommander is an interface for sending commands to the server.
@@ -41,10 +42,10 @@ type ResticRunner func(ctx context.Context, stagingDir string) error
 // Returns the exit code and any error.
 type CommandRunner func(ctx context.Context, name string, args ...string) (exitCode int, err error)
 
-// SQLiteVacuumRunner is a function type for running sqlite3 VACUUM INTO.
-// This allows for testing without actually running sqlite3.
-// srcPath is the source database file, dstPath is the destination.
-type SQLiteVacuumRunner func(ctx context.Context, srcPath, dstPath string) error
+// VCDBTreeSplitter is a function type for splitting a .vcdbs file into vcdbtree format.
+// This allows for testing without actually running the split operation.
+// srcPath is the source .vcdbs file, dstDir is the destination directory.
+type VCDBTreeSplitter func(srcPath, dstDir string) error
 
 // PlayerCheckerInterface is an interface for checking if players are online.
 // This allows for testing without a real player checker.
@@ -57,6 +58,17 @@ type PlayerCheckerInterface interface {
 
 // ErrNoPlayersOnline is returned when a backup is skipped because no players are online.
 var ErrNoPlayersOnline = fmt.Errorf("no players online, backup skipped")
+
+// BackupCompletionWaiter is an interface for waiting for the server to signal backup completion.
+// The server sends "[Server Notification] Backup complete!" when the backup is finished.
+type BackupCompletionWaiter interface {
+	// WaitForBackupComplete waits for the server to send the backup completion message.
+	// Returns the matching line, or an error if the context expires or the server exits.
+	WaitForBackupComplete(ctx context.Context) error
+}
+
+// BackupCompletePattern is the exact suffix that indicates a backup has completed.
+const BackupCompletePattern = "[Server Notification] Backup complete!"
 
 // Manager handles periodic backups of the Vintage Story server.
 type Manager struct {
@@ -85,6 +97,11 @@ type Manager struct {
 	// PauseWhenNoPlayers indicates whether backups should be skipped when no players are online.
 	PauseWhenNoPlayers bool
 
+	// BackupCompletionWaiter is used to wait for the server to signal backup completion.
+	// If set, the manager will wait for the "[Server Notification] Backup complete!"
+	// message before attempting to split the backup file into vcdbtree format.
+	BackupCompletionWaiter BackupCompletionWaiter
+
 	// OnBackupStart is called when a backup starts. Optional.
 	OnBackupStart func()
 
@@ -106,10 +123,10 @@ type Manager struct {
 	// This is primarily for testing.
 	CommandRunner CommandRunner
 
-	// SQLiteVacuumRunner is a custom function to run sqlite3 VACUUM INTO.
-	// If nil, the default sqlite3 command is used.
+	// VCDBTreeSplitter is a custom function to split .vcdbs into vcdbtree format.
+	// If nil, the default vcdbtree.Split is used.
 	// This is primarily for testing.
-	SQLiteVacuumRunner SQLiteVacuumRunner
+	VCDBTreeSplitter VCDBTreeSplitter
 
 	done   chan struct{}
 	wg     sync.WaitGroup
@@ -299,8 +316,17 @@ func (m *Manager) getSaveFileName() (string, error) {
 }
 
 // waitForBackupFile waits for a new .vcdbs file to appear in the Backups directory.
-// It also waits until the file is no longer locked for writing before returning.
+// It first waits for the server to send the "[Server Notification] Backup complete!" message
+// (if BackupCompletionWaiter is configured), then waits for the file to appear and be unlocked.
 func (m *Manager) waitForBackupFile(ctx context.Context, afterTime time.Time) (string, error) {
+	// First, wait for the server to signal that the backup is complete.
+	// This ensures we don't try to access the file while the server is still writing to it.
+	if m.BackupCompletionWaiter != nil {
+		if err := m.BackupCompletionWaiter.WaitForBackupComplete(ctx); err != nil {
+			return "", fmt.Errorf("failed waiting for backup completion: %w", err)
+		}
+	}
+
 	backupsDir := filepath.Join(m.GameDataDir, "Backups")
 
 	// Ensure the backups directory exists
@@ -372,6 +398,7 @@ func (m *Manager) isFileUnlocked(path string) bool {
 }
 
 // createStagingDirectory creates the staging directory with copy-on-write copies.
+// The savegame is converted to vcdbtree format (a directory tree optimized for deduplication).
 func (m *Manager) createStagingDirectory(backupFile, saveFileName string) error {
 	// Clean up any existing staging directory
 	if err := os.RemoveAll(m.StagingDir); err != nil {
@@ -409,22 +436,22 @@ func (m *Manager) createStagingDirectory(backupFile, saveFileName string) error 
 		}
 	}
 
-	// Create the Saves directory
-	savesDir := filepath.Join(m.StagingDir, "Saves")
+	// Create the Saves directory for the vcdbtree output
+	// The saveFileName (without .vcdbs extension) becomes the directory name
+	saveBaseName := strings.TrimSuffix(saveFileName, ".vcdbs")
+	savesDir := filepath.Join(m.StagingDir, "Saves", saveBaseName)
 	if err := os.MkdirAll(savesDir, 0755); err != nil {
 		return fmt.Errorf("failed to create Saves directory: %w", err)
 	}
 
-	// VACUUM the backup file into the staging directory.
-	// This produces a canonical, deterministic SQLite database that maximizes
-	// restic's deduplication efficiency by ensuring unchanged data produces
-	// identical byte sequences.
-	dstSaveFile := filepath.Join(savesDir, saveFileName)
-	if err := m.vacuumDatabase(context.Background(), backupFile, dstSaveFile); err != nil {
-		return fmt.Errorf("failed to vacuum backup file: %w", err)
+	// Split the backup file into vcdbtree format.
+	// This produces a directory tree where each BLOB is stored as a separate file,
+	// optimized for Restic's content-defined chunking deduplication.
+	if err := m.splitToVCDBTree(backupFile, savesDir); err != nil {
+		return fmt.Errorf("failed to split backup to vcdbtree: %w", err)
 	}
 
-	// Remove the original backup file since we've vacuumed it to the destination
+	// Remove the original backup file since we've split it to the destination
 	if err := os.Remove(backupFile); err != nil {
 		return fmt.Errorf("failed to remove original backup file: %w", err)
 	}
@@ -511,25 +538,19 @@ func copyFileRegular(src, dst string) error {
 	return nil
 }
 
-// vacuumDatabase runs sqlite3 VACUUM INTO to create a canonical, deterministic
-// copy of the SQLite database at dstPath. This maximizes restic's deduplication
-// efficiency by ensuring unchanged data produces identical byte sequences.
-func (m *Manager) vacuumDatabase(ctx context.Context, srcPath, dstPath string) error {
-	// Use custom runner if provided (for testing)
-	if m.SQLiteVacuumRunner != nil {
-		return m.SQLiteVacuumRunner(ctx, srcPath, dstPath)
+// splitToVCDBTree converts a .vcdbs SQLite database into vcdbtree format.
+// This directory tree format stores each BLOB as a separate file, maximizing
+// Restic's content-defined chunking deduplication efficiency.
+func (m *Manager) splitToVCDBTree(srcPath, dstDir string) error {
+	// Use custom splitter if provided (for testing)
+	if m.VCDBTreeSplitter != nil {
+		fmt.Printf("Splitting vcdbs to vcdbtree: %s -> %s\n", srcPath, dstDir)
+		return m.VCDBTreeSplitter(srcPath, dstDir)
 	}
 
-	// Build the VACUUM INTO command
-	// sqlite3 src.db "VACUUM INTO 'dst.db'"
-	vacuumCmd := fmt.Sprintf("VACUUM INTO '%s'", dstPath)
-	cmd := exec.CommandContext(ctx, "sqlite3", srcPath, vacuumCmd)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("sqlite3 VACUUM INTO failed: %w\nOutput: %s", err, string(output))
-	}
+	fmt.Printf("Splitting vcdbs to vcdbtree: %s -> %s\n", srcPath, dstDir)
 
-	return nil
+	return vcdbtree.Split(srcPath, dstDir)
 }
 
 // cleanupStaging removes the staging directory.
@@ -627,3 +648,6 @@ var _ ServerCommander = (*server.Server)(nil)
 
 // Ensure Server implements BootChecker at compile time.
 var _ BootChecker = (*server.Server)(nil)
+
+// Ensure Server implements BackupCompletionWaiter at compile time.
+var _ BackupCompletionWaiter = (*server.Server)(nil)

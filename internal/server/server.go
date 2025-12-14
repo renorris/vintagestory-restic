@@ -423,3 +423,59 @@ func (s *Server) PID() int {
 	}
 	return 0
 }
+
+// BackupCompletePattern is the exact suffix that indicates a backup has completed.
+const BackupCompletePattern = "[Server Notification] Backup complete!"
+
+// WaitForBackupComplete waits for the server to send the backup completion notification.
+// It uses strings.HasSuffix to match lines ending with exactly "[Server Notification] Backup complete!".
+// Returns nil on success, or an error if the context expires or the server exits.
+func (s *Server) WaitForBackupComplete(ctx context.Context) error {
+	// Check if server is running
+	select {
+	case <-s.Done():
+		return ErrServerNotRunning
+	default:
+	}
+
+	matchCh := make(chan struct{}, 1)
+	doneCh := make(chan struct{})
+	defer close(doneCh)
+
+	// Register handler to watch for backup complete pattern
+	s.addHandler(func(line string) bool {
+		select {
+		case <-doneCh:
+			return false // Unsubscribe
+		default:
+		}
+
+		if strings.HasSuffix(line, BackupCompletePattern) {
+			select {
+			case matchCh <- struct{}{}:
+			default:
+			}
+			return false // Unsubscribe after match
+		}
+		return true // Keep listening
+	})
+
+	// Wait for match, context cancellation, or server exit
+	select {
+	case <-matchCh:
+		return nil
+	case <-ctx.Done():
+		if ctx.Err() == context.DeadlineExceeded {
+			return ErrPatternTimeout
+		}
+		return ctx.Err()
+	case <-s.Done():
+		// Check if we got a match before the server exited
+		select {
+		case <-matchCh:
+			return nil
+		default:
+			return ErrServerExited
+		}
+	}
+}
