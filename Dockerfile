@@ -16,14 +16,16 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 COPY . .
 
 # Build with CGO enabled (required for go-sqlite3)
+# Use static linking to avoid musl libc dependency in Debian runtime image
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=1 go build -o vintagestory-launcher ./cmd/launcher
+    CGO_ENABLED=1 go build -ldflags '-linkmode external -extldflags "-static"' -o vintagestory-launcher ./cmd/launcher
 
 # Build vcdbtree CLI utility
+# Use static linking to avoid musl libc dependency in Debian runtime image
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=1 go build -o vcdbtree ./cmd/vcdbtree
+    CGO_ENABLED=1 go build -ldflags '-linkmode external -extldflags "-static"' -o vcdbtree ./cmd/vcdbtree
 
 # Fetch restic (/usr/bin/restic)
 FROM restic/restic:latest AS restic-fetcher

@@ -1,0 +1,54 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# IDE and editor files
+.vscode
+.cursor
+.idea
+*.swp
+*.swo
+*~
+
+# Test files and coverage
+*_test.go
+coverage.out
+*.test
+
+# Build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+vintagestory-launcher
+vcdbtree
+
+# Runtime directories
+serverbinaries
+gamedata
+restic_dst
+
+# Documentation (not needed in container)
+README.md
+LICENSE
+
+# CI/CD files
+.github
+.gitlab-ci.yml
+.travis.yml
+.circleci
+
+# Docker files (don't need to copy themselves)
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.yaml
+
+# Temporary files
+*.tmp
+*.log
+*.bak
+.DS_Store
+Thumbs.db
