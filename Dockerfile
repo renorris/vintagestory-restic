@@ -17,15 +17,20 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -o vintagestory-launcher ./cmd/launcher
 
-FROM alpine:3.23
+# Install restic in a separate stage and copy it
+FROM debian:bookworm-slim AS restic-builder
+RUN apt-get update && apt-get install -y --no-install-recommends restic \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install .NET 8 runtime
-RUN apk add --no-cache aspnetcore8-runtime restic
+FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim
+
+# Copy restic from builder
+COPY --from=restic-builder /usr/bin/restic /usr/bin/restic
 
 # Config nonroot user
 RUN mkdir /gamedata /serverbinaries && \
-    addgroup -g 2001 -S vsgroup && \
-    adduser -u 2001 -S -G vsgroup vsuser && \
+    groupadd -g 2001 vsgroup && \
+    useradd -u 2001 -g vsgroup -s /bin/false vsuser && \
     chown -R vsuser:vsgroup /gamedata /serverbinaries
 
 # Copy launcher binary
@@ -35,4 +40,4 @@ COPY --chown=vsuser:vsgroup --from=launcher-builder /build/vintagestory-launcher
 USER vsuser
 
 # Define the command to run the application
-CMD ["vintagestory-launcher"]
+CMD ["/usr/local/bin/vintagestory-launcher"]
