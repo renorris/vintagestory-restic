@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -94,7 +95,7 @@ func TestDownloadAndExtract_Success(t *testing.T) {
 	targetDir := filepath.Join(tmpDir, "extracted")
 
 	// Test downloadAndExtract
-	count, err := downloadAndExtract(server.URL, targetDir)
+	count, err := downloadAndExtract(context.Background(), server.URL, targetDir)
 	if err != nil {
 		t.Fatalf("downloadAndExtract failed: %v", err)
 	}
@@ -143,7 +144,7 @@ func TestDownloadAndExtract_HTTPError(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	_, err := downloadAndExtract(server.URL, tmpDir)
+	_, err := downloadAndExtract(context.Background(), server.URL, tmpDir)
 	if err == nil {
 		t.Fatal("Expected error for HTTP 404, got nil")
 	}
@@ -162,7 +163,7 @@ func TestDownloadAndExtract_InvalidGzip(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	_, err := downloadAndExtract(server.URL, tmpDir)
+	_, err := downloadAndExtract(context.Background(), server.URL, tmpDir)
 	if err == nil {
 		t.Fatal("Expected error for invalid gzip, got nil")
 	}
@@ -190,7 +191,7 @@ func TestDownloadAndExtract_WithSymlinks(t *testing.T) {
 	tmpDir := t.TempDir()
 	targetDir := filepath.Join(tmpDir, "extracted")
 
-	_, err := downloadAndExtract(server.URL, targetDir)
+	_, err := downloadAndExtract(context.Background(), server.URL, targetDir)
 	if err != nil {
 		t.Fatalf("downloadAndExtract with symlinks failed: %v", err)
 	}
@@ -251,7 +252,7 @@ func TestDownloadAndExtract_PathTraversalProtection(t *testing.T) {
 			tmpDir := t.TempDir()
 			targetDir := filepath.Join(tmpDir, "extracted")
 
-			_, err := downloadAndExtract(server.URL, targetDir)
+			_, err := downloadAndExtract(context.Background(), server.URL, targetDir)
 
 			if tt.wantErr {
 				if err == nil {
@@ -284,15 +285,33 @@ func TestDownloadAndExtract_NoETag(t *testing.T) {
 	tmpDir := t.TempDir()
 	targetDir := filepath.Join(tmpDir, "extracted")
 
-	_, err := downloadAndExtract(server.URL, targetDir)
+	_, err := downloadAndExtract(context.Background(), server.URL, targetDir)
 	if err != nil {
 		t.Fatalf("downloadAndExtract failed: %v", err)
 	}
 
-	// Verify version info was not saved (or saved without ETag)
+	// Verify version info was saved without ETag field
 	versionPath := filepath.Join(targetDir, "launcher-version.json")
-	if _, err := os.Stat(versionPath); err == nil {
-		t.Error("Version info file should not be created without ETag")
+	info, err := readVersionInfo(targetDir)
+	if err != nil {
+		t.Fatalf("readVersionInfo failed: %v", err)
+	}
+	if info == nil {
+		t.Fatal("Version info should be saved even without ETag")
+	}
+	if info.ETag != "" {
+		t.Errorf("ETag should be empty, got: %s", info.ETag)
+	}
+	if info.URL != server.URL {
+		t.Errorf("URL should be %s, got: %s", server.URL, info.URL)
+	}
+	// Verify JSON file doesn't contain etag field
+	data, err := os.ReadFile(versionPath)
+	if err != nil {
+		t.Fatalf("Failed to read version file: %v", err)
+	}
+	if strings.Contains(string(data), "etag") {
+		t.Errorf("Version file should not contain etag field when no ETag is returned, got: %s", string(data))
 	}
 }
 
@@ -474,7 +493,7 @@ func TestGetETag_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	etag, err := GetETag(server.URL)
+	etag, err := GetETag(context.Background(), server.URL)
 	if err != nil {
 		t.Fatalf("GetETag failed: %v", err)
 	}
@@ -490,7 +509,7 @@ func TestGetETag_HTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := GetETag(server.URL)
+	_, err := GetETag(context.Background(), server.URL)
 	if err == nil {
 		t.Fatal("Expected error for HTTP 404")
 	}
@@ -506,7 +525,7 @@ func TestGetETag_NoETagHeader(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := GetETag(server.URL)
+	_, err := GetETag(context.Background(), server.URL)
 	if err == nil {
 		t.Fatal("Expected error for missing ETag header")
 	}
@@ -546,7 +565,7 @@ func TestGetETag_ETagNormalization(t *testing.T) {
 			}))
 			defer server.Close()
 
-			etag, err := GetETag(server.URL)
+			etag, err := GetETag(context.Background(), server.URL)
 			if err != nil {
 				t.Fatalf("GetETag failed: %v", err)
 			}
@@ -567,7 +586,7 @@ func TestNeedsDownload_NoLocalVersion(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	needs, err := NeedsDownload(server.URL, tmpDir)
+	needs, err := NeedsDownload(context.Background(), server.URL, tmpDir)
 	if err != nil {
 		t.Fatalf("NeedsDownload failed: %v", err)
 	}
@@ -595,7 +614,7 @@ func TestNeedsDownload_SameETagAndURL(t *testing.T) {
 	}
 	saveVersionInfo(tmpDir, info)
 
-	needs, err := NeedsDownload(server.URL, tmpDir)
+	needs, err := NeedsDownload(context.Background(), server.URL, tmpDir)
 	if err != nil {
 		t.Fatalf("NeedsDownload failed: %v", err)
 	}
@@ -621,7 +640,7 @@ func TestNeedsDownload_DifferentETag(t *testing.T) {
 	}
 	saveVersionInfo(tmpDir, info)
 
-	needs, err := NeedsDownload(server.URL, tmpDir)
+	needs, err := NeedsDownload(context.Background(), server.URL, tmpDir)
 	if err != nil {
 		t.Fatalf("NeedsDownload failed: %v", err)
 	}
@@ -647,7 +666,7 @@ func TestNeedsDownload_DifferentURL(t *testing.T) {
 	}
 	saveVersionInfo(tmpDir, info)
 
-	needs, err := NeedsDownload(server.URL, tmpDir)
+	needs, err := NeedsDownload(context.Background(), server.URL, tmpDir)
 	if err != nil {
 		t.Fatalf("NeedsDownload failed: %v", err)
 	}
@@ -673,7 +692,7 @@ func TestNeedsDownload_CaseInsensitiveETag(t *testing.T) {
 	}
 	saveVersionInfo(tmpDir, info)
 
-	needs, err := NeedsDownload(server.URL, tmpDir)
+	needs, err := NeedsDownload(context.Background(), server.URL, tmpDir)
 	if err != nil {
 		t.Fatalf("NeedsDownload failed: %v", err)
 	}
@@ -691,7 +710,7 @@ func TestNeedsDownload_ServerError(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	needs, err := NeedsDownload(server.URL, tmpDir)
+	needs, err := NeedsDownload(context.Background(), server.URL, tmpDir)
 	if err == nil {
 		t.Fatal("Expected error when server returns error")
 	}
@@ -700,6 +719,64 @@ func TestNeedsDownload_ServerError(t *testing.T) {
 	if !needs {
 		t.Error("Expected needs=true when ETag check fails")
 	}
+}
+
+func TestNeedsDownload_NoETagInLocalVersion(t *testing.T) {
+	// Test case 1: Server also has no ETag
+	t.Run("server_no_etag", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// No ETag header
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		tmpDir := t.TempDir()
+
+		// Save version info without ETag
+		info := versionInfo{
+			URL: server.URL,
+			// ETag is empty/omitted
+		}
+		saveVersionInfo(tmpDir, info)
+
+		needs, err := NeedsDownload(context.Background(), server.URL, tmpDir)
+		if err == nil {
+			t.Fatal("Expected error when server has no ETag")
+		}
+
+		// Should return true (needs download) when no ETag available
+		if !needs {
+			t.Error("Expected needs=true when no ETag available")
+		}
+	})
+
+	// Test case 2: Server has ETag but local version doesn't
+	t.Run("server_has_etag", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("ETag", "\"server-etag\"")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer server.Close()
+
+		tmpDir := t.TempDir()
+
+		// Save version info without ETag
+		info := versionInfo{
+			URL: server.URL,
+			// ETag is empty/omitted
+		}
+		saveVersionInfo(tmpDir, info)
+
+		needs, err := NeedsDownload(context.Background(), server.URL, tmpDir)
+		if err != nil {
+			t.Fatalf("NeedsDownload failed: %v", err)
+		}
+
+		// Should return true (needs download) when local version has no ETag
+		if !needs {
+			t.Error("Expected needs=true when local version has no ETag")
+		}
+	})
 }
 
 func TestDoServerBinaryDownload_MissingEnvVar(t *testing.T) {
@@ -714,7 +791,7 @@ func TestDoServerBinaryDownload_MissingEnvVar(t *testing.T) {
 
 	tmpDir := t.TempDir()
 
-	err := DoServerBinaryDownload(tmpDir)
+	err := DoServerBinaryDownload(context.Background(), tmpDir)
 	if err == nil {
 		t.Fatal("Expected error when VS_SERVER_TARGZ_URL not set")
 	}
@@ -756,7 +833,7 @@ func TestDoServerBinaryDownload_Success(t *testing.T) {
 		}
 	}()
 
-	err := DoServerBinaryDownload(targetDir)
+	err := DoServerBinaryDownload(context.Background(), targetDir)
 	if err != nil {
 		t.Fatalf("DoServerBinaryDownload failed: %v", err)
 	}
@@ -815,7 +892,7 @@ func TestDoServerBinaryDownload_SkipsWhenUpToDate(t *testing.T) {
 		}
 	}()
 
-	err := DoServerBinaryDownload(targetDir)
+	err := DoServerBinaryDownload(context.Background(), targetDir)
 	if err != nil {
 		t.Fatalf("DoServerBinaryDownload failed: %v", err)
 	}
@@ -874,7 +951,7 @@ func TestDoServerBinaryDownload_RemovesOldFiles(t *testing.T) {
 		}
 	}()
 
-	err := DoServerBinaryDownload(targetDir)
+	err := DoServerBinaryDownload(context.Background(), targetDir)
 	if err != nil {
 		t.Fatalf("DoServerBinaryDownload failed: %v", err)
 	}
@@ -907,7 +984,7 @@ func TestDoServerBinaryDownload_PathNormalization(t *testing.T) {
 
 	// This should fail due to missing URL, but path should be normalized first
 	os.Unsetenv("VS_SERVER_TARGZ_URL")
-	err := DoServerBinaryDownload(testDir)
+	err := DoServerBinaryDownload(context.Background(), testDir)
 
 	// Should get error about missing URL, not about path
 	if err == nil {
@@ -954,7 +1031,7 @@ func TestDoServerBinaryDownload_ContinuesOnETagCheckFailure(t *testing.T) {
 		}
 	}()
 
-	err := DoServerBinaryDownload(targetDir)
+	err := DoServerBinaryDownload(context.Background(), targetDir)
 	if err != nil {
 		t.Fatalf("DoServerBinaryDownload should succeed despite ETag check failure: %v", err)
 	}
@@ -962,6 +1039,77 @@ func TestDoServerBinaryDownload_ContinuesOnETagCheckFailure(t *testing.T) {
 	// Verify file was still downloaded
 	if _, err := os.Stat(filepath.Join(targetDir, "file.txt")); err != nil {
 		t.Error("File was not downloaded despite ETag check failure")
+	}
+}
+
+func TestDoServerBinaryDownload_ContextCancellation(t *testing.T) {
+	// Create a server that will hang on HEAD request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Block until the request context is cancelled
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	targetDir := filepath.Join(tmpDir, "server")
+
+	oldURL := os.Getenv("VS_SERVER_TARGZ_URL")
+	os.Setenv("VS_SERVER_TARGZ_URL", server.URL)
+	defer func() {
+		if oldURL != "" {
+			os.Setenv("VS_SERVER_TARGZ_URL", oldURL)
+		} else {
+			os.Unsetenv("VS_SERVER_TARGZ_URL")
+		}
+	}()
+
+	// Create a context that we cancel immediately
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	err := DoServerBinaryDownload(ctx, targetDir)
+
+	// Should return context.Canceled error
+	if err != context.Canceled {
+		t.Errorf("Expected context.Canceled error, got: %v", err)
+	}
+}
+
+func TestGetETag_ContextCancellation(t *testing.T) {
+	// Create a server that will hang
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := GetETag(ctx, server.URL)
+	if err == nil {
+		t.Fatal("Expected error when context is cancelled")
+	}
+}
+
+func TestNeedsDownload_ContextCancellation(t *testing.T) {
+	// Create a server that will hang
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	needs, err := NeedsDownload(ctx, server.URL, tmpDir)
+	if err == nil {
+		t.Fatal("Expected error when context is cancelled")
+	}
+	// When error occurs, we return true (needs download)
+	if !needs {
+		t.Error("Expected needs=true when context is cancelled")
 	}
 }
 

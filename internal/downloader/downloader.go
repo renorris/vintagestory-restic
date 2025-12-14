@@ -3,6 +3,7 @@ package downloader
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,14 +17,19 @@ import (
 // it to the target directory. The extraction is done in a memory-efficient
 // streaming fashion, piping the HTTP response directly through gzip decompression
 // and tar extraction.
-func downloadAndExtract(url, targetDir string) (int, error) {
+func downloadAndExtract(ctx context.Context, url, targetDir string) (int, error) {
 	// Ensure target directory exists
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return 0, fmt.Errorf("failed to create target directory: %w", err)
 	}
 
-	// Download the file
-	resp, err := http.Get(url)
+	// Download the file with context
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("failed to download file: %w", err)
 	}
@@ -101,16 +107,16 @@ func downloadAndExtract(url, targetDir string) (int, error) {
 
 	// Save version info after successful extraction
 	etag := resp.Header.Get("ETag")
+	versionInfo := versionInfo{
+		URL: url,
+	}
 	if etag != "" {
 		// Normalize ETag (remove quotes)
 		etag = strings.Trim(etag, "\"")
-		versionInfo := versionInfo{
-			ETag: etag,
-			URL:  url,
-		}
-		if err := saveVersionInfo(targetDir, versionInfo); err != nil {
-			return extractedCount, fmt.Errorf("failed to save version info: %w", err)
-		}
+		versionInfo.ETag = etag
+	}
+	if err := saveVersionInfo(targetDir, versionInfo); err != nil {
+		return extractedCount, fmt.Errorf("failed to save version info: %w", err)
 	}
 
 	return extractedCount, nil
@@ -169,7 +175,7 @@ func removeDirectoryContents(dir string) error {
 
 // versionInfo represents the version information stored in launcher-version.json
 type versionInfo struct {
-	ETag string `json:"etag"`
+	ETag string `json:"etag,omitempty"`
 	URL  string `json:"url"`
 }
 
@@ -209,8 +215,13 @@ func readVersionInfo(targetDir string) (*versionInfo, error) {
 }
 
 // GetETag performs a HEAD request to get the ETag header from the server.
-func GetETag(url string) (string, error) {
-	resp, err := http.Head(url)
+func GetETag(ctx context.Context, url string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to perform HEAD request: %w", err)
 	}
@@ -233,8 +244,8 @@ func GetETag(url string) (string, error) {
 
 // NeedsDownload checks if a download is needed by comparing the server ETag and URL
 // with the locally stored version info. Returns true if download is needed.
-func NeedsDownload(url, targetDir string) (bool, error) {
-	serverETag, err := GetETag(url)
+func NeedsDownload(ctx context.Context, url, targetDir string) (bool, error) {
+	serverETag, err := GetETag(ctx, url)
 	if err != nil {
 		return true, err // If we can't get ETag, assume we need to download
 	}
@@ -270,7 +281,7 @@ func NeedsDownload(url, targetDir string) (bool, error) {
 // checks for updates via ETag comparison, removes old binaries if needed,
 // downloads and extracts the server binaries to the target directory.
 // The URL is read from the VS_SERVER_TARGZ_URL environment variable.
-func DoServerBinaryDownload(targetDir string) error {
+func DoServerBinaryDownload(ctx context.Context, targetDir string) error {
 	// Normalize and resolve the target directory path to handle any double slashes or other path issues
 	// This ensures we always work with a clean, absolute path
 	var err error
@@ -288,8 +299,12 @@ func DoServerBinaryDownload(targetDir string) error {
 
 	// Check if download is needed by comparing ETags
 	fmt.Println("Checking for server binary updates...")
-	needsDownload, err := NeedsDownload(url, targetDir)
+	needsDownload, err := NeedsDownload(ctx, url, targetDir)
 	if err != nil {
+		// Check if context was cancelled
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		fmt.Fprintf(os.Stderr, "Warning: Failed to check ETag: %v\n", err)
 		fmt.Println("Proceeding with download...")
 		needsDownload = true
@@ -313,7 +328,7 @@ func DoServerBinaryDownload(targetDir string) error {
 	fmt.Printf("Downloading Vintage Story server from %s...\n", url)
 	fmt.Println("Extracting files...")
 
-	extractedCount, err := downloadAndExtract(url, targetDir)
+	extractedCount, err := downloadAndExtract(ctx, url, targetDir)
 	if err != nil {
 		return fmt.Errorf("failed to download and extract: %w", err)
 	}

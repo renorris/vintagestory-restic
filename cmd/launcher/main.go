@@ -38,17 +38,20 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Stage 1: Download server binaries if needed
-	if err := downloader.DoServerBinaryDownload(serverBinariesDir); err != nil {
-		return fmt.Errorf("failed to download server binaries: %w", err)
-	}
+	// Start a goroutine to cancel context on first signal
+	go func() {
+		sig := <-sigChan
+		fmt.Printf("\nReceived %v, cancelling operations...\n", sig)
+		cancel()
+	}()
 
-	// Check for signal between stages
-	select {
-	case sig := <-sigChan:
-		fmt.Printf("Received %v during startup, exiting...\n", sig)
-		return nil
-	default:
+	// Stage 1: Download server binaries if needed
+	if err := downloader.DoServerBinaryDownload(ctx, serverBinariesDir); err != nil {
+		if ctx.Err() != nil {
+			// Context was cancelled, exit cleanly
+			return nil
+		}
+		return fmt.Errorf("failed to download server binaries: %w", err)
 	}
 
 	// Stage 2: Start the Vintage Story server
@@ -68,7 +71,7 @@ func run() error {
 
 	fmt.Printf("Server started with PID %d\n", srv.PID())
 
-	// Wait for either the server to exit or a signal
+	// Wait for either the server to exit or context cancellation (from signal)
 	select {
 	case <-srv.Done():
 		// Server exited on its own
@@ -78,13 +81,9 @@ func run() error {
 		fmt.Println("Server exited cleanly.")
 		return nil
 
-	case sig := <-sigChan:
-		// First signal received - start graceful shutdown
-		fmt.Printf("\nReceived %v, initiating graceful shutdown (30s timeout)...\n", sig)
-
-		// Cancel the context to trigger graceful shutdown
-		// This will cause the server's handleContextCancel to call Stop()
-		cancel()
+	case <-ctx.Done():
+		// Context cancelled (signal received) - start graceful shutdown
+		fmt.Println("Initiating graceful shutdown (30s timeout)...")
 
 		// Wait for either:
 		// 1. Server to exit gracefully
