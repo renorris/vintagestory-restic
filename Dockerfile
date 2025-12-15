@@ -38,10 +38,10 @@ COPY --from=restic-fetcher /usr/bin/restic /usr/bin/restic
 # Note: sqlite3 CLI no longer needed - vcdbtree handles database conversion natively
 
 # Config nonroot user
-RUN mkdir /gamedata /serverbinaries && \
+RUN mkdir /gamedata /serverbinaries /backupcache && \
     groupadd -g 2001 vsgroup && \
     useradd -u 2001 -g vsgroup -s /bin/false vsuser && \
-    chown -R vsuser:vsgroup /gamedata /serverbinaries
+    chown -R vsuser:vsgroup /gamedata /serverbinaries /backupcache
 
 # Copy launcher and vcdbtree binaries
 COPY --chown=vsuser:vsgroup --from=launcher-builder /build/vintagestory-launcher /usr/local/bin/

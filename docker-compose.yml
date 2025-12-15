@@ -1,0 +1,7 @@
+services:
+  vintagestory:
+    image: ghcr.io/renorris/vintagestory-restic:latest
+    restart: unless-stopped
+    #
+    # TODO ...
+    #
