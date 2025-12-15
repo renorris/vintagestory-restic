@@ -4,7 +4,7 @@ A containerized Vintage Story dedicated server with automated, deduplication-opt
 
 ## Overview
 
-This project provides a Docker image that runs a Vintage Story dedicated server with built-in backup automation. The backup system converts the game's SQLite-based savegame format into a directory structure specifically designed to maximize Restic's content-addressable deduplication, significantly reducing storage requirements for incremental backups.
+Run a Vintage Story dedicated server with built-in backup automation. The backup system converts the game's SQLite-based savegame format into a directory structure designed to help Restic's deduplication algorithm, which should help reduce the size of diff-based backups.
 
 > [!WARNING]  
 > This project is experimental and should be properly vetted if you want to use this on a high-stakes server where not losing your savefile is paramount.
@@ -85,10 +85,10 @@ Additional Restic backend credentials (e.g., `AWS_ACCESS_KEY_ID`, `AWS_SECRET_AC
 
 ### Launcher
 
-The launcher binary orchestrates the entire system lifecycle:
+The launcher binary orchestrates the entire server lifecycle:
 
 1. **Binary Download**: Checks for server updates and downloads new versions when available
-2. **Server Process Management**: Starts the Vintage Story server via the .NET runtime, managing stdin/stdout pipes for command I/O
+2. **Server Process Management**: Fork-execs the Vintage Story server, managing stdin/stdout pipes for command I/O
 3. **Backup Scheduling**: Runs periodic backups at the configured interval
 4. **Signal Handling**: Propagates SIGINT/SIGTERM for graceful shutdown
 
@@ -131,6 +131,15 @@ staging/
 
 A standalone utility for converting between `.vcdbs` and vcdbtree formats:
 
+**Installation:**
+
+```bash
+# Install directly (requires Go 1.25+ and GCC for CGO)
+CGO_ENABLED=1 go install github.com/renorris/vintagestory-restic/cmd/vcdbtree@latest
+```
+
+**Usage:**
+
 ```bash
 # Convert a savegame to vcdbtree format
 vcdbtree split /gamedata/Backups/backup.vcdbs /tmp/backup-tree
@@ -139,46 +148,7 @@ vcdbtree split /gamedata/Backups/backup.vcdbs /tmp/backup-tree
 vcdbtree combine /tmp/backup-tree /gamedata/Saves/restored.vcdbs
 ```
 
-This tool is useful for manually inspecting or restoring backups.
-
-## Building from Source
-
-Requirements:
-- Go 1.25+
-- GCC (for CGO, required by go-sqlite3)
-
-```bash
-# Build the launcher
-CGO_ENABLED=1 go build -o vintagestory-launcher ./cmd/launcher
-
-# Build the vcdbtree utility
-CGO_ENABLED=1 go build -o vcdbtree ./cmd/vcdbtree
-```
-
-### Docker Build
-
-```bash
-docker build -t vintagestory-restic .
-```
-
-## Restoring from Backup
-
-1. List available snapshots:
-   ```bash
-   restic snapshots
-   ```
-
-2. Restore a snapshot:
-   ```bash
-   restic restore <snapshot-id> --target /tmp/restore
-   ```
-
-3. Use `vcdbtree combine` to reconstruct the savegame:
-   ```bash
-   vcdbtree combine /tmp/restore/backupcache/staging/Saves/<worldname> /gamedata/Saves/<worldname>.vcdbs
-   ```
-
-4. Copy the remaining files (Logs, Playerdata, Mods, configs) from the restored directory to `/gamedata`.
+This tool is for manually inspecting or restoring backups.
 
 ## License
 
