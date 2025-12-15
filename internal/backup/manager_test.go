@@ -460,7 +460,7 @@ func TestManager_SendsGenbackupCommand(t *testing.T) {
 	os.Unsetenv("RESTIC_REPOSITORY")
 
 	// performBackup will fail at the restic step, but we can verify the command was sent
-	_ = m.performBackup(ctx)
+	_ = m.performBackup(ctx, false)
 
 	commands := server.getCommands()
 	found := false
@@ -738,7 +738,7 @@ func TestManager_PerformBackup_CleansUpBackupFile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := m.performBackup(ctx)
+	err := m.performBackup(ctx, false)
 	if err != nil {
 		t.Fatalf("performBackup() failed: %v", err)
 	}
@@ -799,7 +799,7 @@ func TestManager_PerformBackup_PersistsStagingOnResticFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := m.performBackup(ctx)
+	err := m.performBackup(ctx, false)
 	if err == nil {
 		t.Fatal("performBackup() expected to fail when restic fails")
 	}
@@ -829,7 +829,7 @@ func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 
 		if err != ErrServerNotBooted {
 			t.Errorf("performBackup() error = %v, want ErrServerNotBooted", err)
@@ -882,7 +882,7 @@ func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 		if err != nil {
 			t.Errorf("performBackup() unexpected error: %v", err)
 		}
@@ -932,7 +932,7 @@ func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 		if err != nil {
 			t.Errorf("performBackup() unexpected error: %v", err)
 		}
@@ -1034,7 +1034,7 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 		}
 
 		ctx := context.Background()
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 
 		if err != ErrNoPlayersOnline {
 			t.Errorf("performBackup() error = %v, want ErrNoPlayersOnline", err)
@@ -1090,7 +1090,7 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 		if err != nil {
 			t.Errorf("performBackup() unexpected error: %v", err)
 		}
@@ -1146,7 +1146,7 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 		if err != nil {
 			t.Errorf("performBackup() unexpected error: %v", err)
 		}
@@ -1200,7 +1200,7 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 		if err != nil {
 			t.Errorf("performBackup() unexpected error: %v", err)
 		}
@@ -1254,7 +1254,7 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			backupFile := filepath.Join(backupsDir, "backup1.vcdbs")
 			os.WriteFile(backupFile, []byte("backup data"), 0644)
 		}()
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 		if err != nil {
 			t.Errorf("First performBackup() unexpected error: %v", err)
 		}
@@ -1265,16 +1265,73 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			backupFile := filepath.Join(backupsDir, "backup2.vcdbs")
 			os.WriteFile(backupFile, []byte("backup data"), 0644)
 		}()
-		err = m.performBackup(ctx)
+		err = m.performBackup(ctx, false)
 		if err != nil {
 			t.Errorf("Second performBackup() unexpected error: %v", err)
 		}
 
 		// Now set ShouldBackup to false and try again
 		playerChecker.SetShouldBackup(false)
-		err = m.performBackup(ctx)
+		err = m.performBackup(ctx, false)
 		if err != ErrNoPlayersOnline {
 			t.Errorf("Third performBackup() error = %v, want ErrNoPlayersOnline", err)
+		}
+	})
+
+	t.Run("backup proceeds when skipPlayerCheck is true even with no players", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+		stagingDir := t.TempDir()
+		backupsDir := filepath.Join(gameDataDir, "Backups")
+		os.MkdirAll(backupsDir, 0755)
+
+		// Create serverconfig.json
+		config := map[string]interface{}{
+			"WorldConfig": map[string]interface{}{
+				"SaveFileLocation": "/gamedata/Saves/test.vcdbs",
+			},
+		}
+		configData, _ := json.Marshal(config)
+		os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), configData, 0644)
+
+		// Player checker says no backup needed
+		playerChecker := &mockPlayerChecker{shouldBackup: false}
+		bootChecker := &mockBootChecker{hasBooted: true}
+
+		m := &Manager{
+			Interval:           time.Second,
+			Server:             &mockServer{},
+			BootChecker:        bootChecker,
+			PlayerChecker:      playerChecker,
+			PauseWhenNoPlayers: true,
+			GameDataDir:        gameDataDir,
+			StagingDir:         stagingDir,
+			BackupTimeout:      2 * time.Second,
+			ResticRunner: func(ctx context.Context, stagingDir string) error {
+				return nil
+			},
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
+			},
+		}
+
+		// Create a backup file that will be found
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			backupFile := filepath.Join(backupsDir, "backup.vcdbs")
+			os.WriteFile(backupFile, []byte("backup data"), 0644)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		// Use skipPlayerCheck=true to bypass player check (for boot-time backups)
+		err := m.performBackup(ctx, true)
+		if err != nil {
+			t.Errorf("performBackup() with skipPlayerCheck=true unexpected error: %v", err)
 		}
 	})
 }
@@ -1666,7 +1723,7 @@ func TestManager_WaitForBackupFile_WaitsForBackupCompletionNotification(t *testi
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 		if err != nil {
 			t.Errorf("performBackup() unexpected error: %v", err)
 		}
@@ -1709,7 +1766,7 @@ func TestManager_WaitForBackupFile_WaitsForBackupCompletionNotification(t *testi
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 		if err == nil {
 			t.Error("Expected error when backup completion wait times out")
 		}
@@ -1749,7 +1806,7 @@ func TestManager_WaitForBackupFile_WaitsForBackupCompletionNotification(t *testi
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 		if err == nil {
 			t.Error("Expected error when backup completion waiter returns error")
 		}
@@ -1806,7 +1863,7 @@ func TestManager_WaitForBackupFile_WaitsForBackupCompletionNotification(t *testi
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 		if err != nil {
 			t.Errorf("performBackup() unexpected error: %v", err)
 		}
@@ -1866,7 +1923,7 @@ func TestManager_WaitForBackupFile_WaitsForBackupCompletionNotification(t *testi
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		err := m.performBackup(ctx)
+		err := m.performBackup(ctx, false)
 		if err != nil {
 			t.Errorf("performBackup() unexpected error: %v", err)
 		}

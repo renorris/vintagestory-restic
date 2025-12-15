@@ -138,13 +138,16 @@ func run() error {
 		}
 	}
 
-	// Set up OnBoot callback to optionally trigger backup-on-start
+	// Set up OnBoot callback to always trigger backup-on-start
 	srv.OnBoot = func() {
-		// Trigger backup-on-start if configured
-		if backupConfig.Enabled && backupConfig.BackupOnServerStart {
-			fmt.Println("Triggering immediate backup...")
+		// Always trigger backup-on-start when backups are enabled
+		// This ensures a backup is performed as soon as the server boots,
+		// even if there are no players online.
+		if backupConfig.Enabled {
+			fmt.Println("Triggering immediate backup on server boot...")
 			go func() {
-				if err := backupManager.RunBackupNow(ctx); err != nil {
+				// Skip player check for boot-time backup to ensure it always runs
+				if err := backupManager.RunBackupNow(ctx, true); err != nil {
 					fmt.Printf("Backup on server start failed: %v\n", err)
 				}
 			}()

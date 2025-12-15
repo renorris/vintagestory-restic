@@ -232,7 +232,7 @@ func (m *Manager) runBackup(ctx context.Context) {
 		m.OnBackupStart()
 	}
 
-	err := m.performBackup(ctx)
+	err := m.performBackup(ctx, false) // Normal periodic backups respect player check
 
 	if m.OnBackupComplete != nil {
 		m.OnBackupComplete(err, time.Since(startTime))
@@ -240,7 +240,8 @@ func (m *Manager) runBackup(ctx context.Context) {
 }
 
 // performBackup executes the full backup workflow.
-func (m *Manager) performBackup(ctx context.Context) error {
+// skipPlayerCheck, if true, bypasses the player check and always runs the backup.
+func (m *Manager) performBackup(ctx context.Context, skipPlayerCheck bool) error {
 	// Step 0a: Check if server has booted (if BootChecker is configured)
 	if m.BootChecker != nil && !m.BootChecker.HasBooted() {
 		return ErrServerNotBooted
@@ -249,7 +250,8 @@ func (m *Manager) performBackup(ctx context.Context) error {
 	// Step 0b: Check if backup should run based on player status
 	// ShouldBackup() returns true if players are online, OR if players
 	// were online previously but have now all logged off (final backup).
-	if m.PauseWhenNoPlayers && m.PlayerChecker != nil {
+	// Skip this check if skipPlayerCheck is true (e.g., for boot-time backups).
+	if !skipPlayerCheck && m.PauseWhenNoPlayers && m.PlayerChecker != nil {
 		if !m.PlayerChecker.ShouldBackup() {
 			return ErrNoPlayersOnline
 		}
@@ -555,8 +557,10 @@ func (m *Manager) runCommandWithOutput(ctx context.Context, name string, args ..
 }
 
 // RunBackupNow triggers an immediate backup. This is useful for testing.
-func (m *Manager) RunBackupNow(ctx context.Context) error {
-	return m.performBackup(ctx)
+// skipPlayerCheck, if true, bypasses the player check and always runs the backup.
+// This is useful for boot-time backups that should run regardless of player status.
+func (m *Manager) RunBackupNow(ctx context.Context, skipPlayerCheck bool) error {
+	return m.performBackup(ctx, skipPlayerCheck)
 }
 
 // Ensure Server implements ServerCommander at compile time.
