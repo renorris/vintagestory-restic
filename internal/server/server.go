@@ -37,7 +37,7 @@ const BootPattern = "Dedicated Server now running"
 // interacting with its stdin/stdout streams.
 type Server struct {
 	// ServerPath is the path to the server executable.
-	// If empty, defaults to using '/usr/bin/dotnet /serverbinaries/VintageStoryServer.dll'.
+	// If empty, defaults to using '/usr/bin/dotnet /serverbinaries/VintagestoryServer.dll'.
 	// This allows tests to override the command while production uses dotnet.
 	ServerPath string
 
@@ -97,7 +97,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.ServerPath != "" {
 		s.cmd = exec.Command(s.ServerPath, s.Args...)
 	} else {
-		args := append([]string{"/serverbinaries/VintageStoryServer.dll"}, s.Args...)
+		args := append([]string{"/serverbinaries/VintagestoryServer.dll"}, s.Args...)
 		s.cmd = exec.Command("/usr/bin/dotnet", args...)
 	}
 	if s.WorkingDir != "" {
