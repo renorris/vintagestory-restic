@@ -1942,3 +1942,274 @@ func TestManager_WaitForBackupFile_WaitsForBackupCompletionNotification(t *testi
 		}
 	})
 }
+
+func TestManager_RunResticPrune(t *testing.T) {
+	t.Run("does nothing when PruneRetention is empty", func(t *testing.T) {
+		pruneCalled := false
+
+		m := &Manager{
+			Interval:       time.Second,
+			Server:         &mockServer{},
+			PruneRetention: "",
+			PruneRunner: func(ctx context.Context, retentionOptions string) error {
+				pruneCalled = true
+				return nil
+			},
+		}
+
+		ctx := context.Background()
+		err := m.runResticPrune(ctx)
+		if err != nil {
+			t.Errorf("runResticPrune() unexpected error: %v", err)
+		}
+
+		if pruneCalled {
+			t.Error("PruneRunner should not be called when PruneRetention is empty")
+		}
+	})
+
+	t.Run("calls PruneRunner when PruneRetention is set", func(t *testing.T) {
+		var capturedOptions string
+		pruneCalled := false
+
+		m := &Manager{
+			Interval:       time.Second,
+			Server:         &mockServer{},
+			PruneRetention: "--keep-daily 7 --keep-weekly 4",
+			PruneRunner: func(ctx context.Context, retentionOptions string) error {
+				pruneCalled = true
+				capturedOptions = retentionOptions
+				return nil
+			},
+		}
+
+		ctx := context.Background()
+		err := m.runResticPrune(ctx)
+		if err != nil {
+			t.Errorf("runResticPrune() unexpected error: %v", err)
+		}
+
+		if !pruneCalled {
+			t.Error("PruneRunner should be called when PruneRetention is set")
+		}
+
+		if capturedOptions != "--keep-daily 7 --keep-weekly 4" {
+			t.Errorf("PruneRunner received options = %q, want %q", capturedOptions, "--keep-daily 7 --keep-weekly 4")
+		}
+	})
+
+	t.Run("returns error from PruneRunner", func(t *testing.T) {
+		expectedErr := fmt.Errorf("simulated prune failure")
+
+		m := &Manager{
+			Interval:       time.Second,
+			Server:         &mockServer{},
+			PruneRetention: "--keep-daily 7",
+			PruneRunner: func(ctx context.Context, retentionOptions string) error {
+				return expectedErr
+			},
+		}
+
+		ctx := context.Background()
+		err := m.runResticPrune(ctx)
+		if err != expectedErr {
+			t.Errorf("runResticPrune() error = %v, want %v", err, expectedErr)
+		}
+	})
+}
+
+func TestManager_PerformBackup_RunsPruneAfterBackup(t *testing.T) {
+	t.Run("prune runs after successful backup", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+		stagingDir := t.TempDir()
+		backupsDir := filepath.Join(gameDataDir, "Backups")
+		os.MkdirAll(backupsDir, 0755)
+
+		// Create serverconfig.json
+		config := map[string]interface{}{
+			"WorldConfig": map[string]interface{}{
+				"SaveFileLocation": "/gamedata/Saves/test.vcdbs",
+			},
+		}
+		configData, _ := json.Marshal(config)
+		os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), configData, 0644)
+
+		var mu sync.Mutex
+		var order []string
+
+		m := &Manager{
+			Interval:       time.Second,
+			Server:         &mockServer{},
+			GameDataDir:    gameDataDir,
+			StagingDir:     stagingDir,
+			BackupTimeout:  2 * time.Second,
+			PruneRetention: "--keep-daily 7",
+			ResticRunner: func(ctx context.Context, stagingDir string) error {
+				mu.Lock()
+				order = append(order, "backup")
+				mu.Unlock()
+				return nil
+			},
+			PruneRunner: func(ctx context.Context, retentionOptions string) error {
+				mu.Lock()
+				order = append(order, "prune")
+				mu.Unlock()
+				return nil
+			},
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
+			},
+		}
+
+		// Create a backup file that will be found
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			backupFile := filepath.Join(backupsDir, "backup.vcdbs")
+			os.WriteFile(backupFile, []byte("backup data"), 0644)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := m.performBackup(ctx, false)
+		if err != nil {
+			t.Errorf("performBackup() unexpected error: %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		// Verify backup was called before prune
+		if len(order) != 2 {
+			t.Errorf("Expected 2 operations, got %d: %v", len(order), order)
+		} else {
+			if order[0] != "backup" {
+				t.Errorf("Expected backup to be called first, got: %v", order)
+			}
+			if order[1] != "prune" {
+				t.Errorf("Expected prune to be called second, got: %v", order)
+			}
+		}
+	})
+
+	t.Run("prune failure causes performBackup to fail", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+		stagingDir := t.TempDir()
+		backupsDir := filepath.Join(gameDataDir, "Backups")
+		os.MkdirAll(backupsDir, 0755)
+
+		// Create serverconfig.json
+		config := map[string]interface{}{
+			"WorldConfig": map[string]interface{}{
+				"SaveFileLocation": "/gamedata/Saves/test.vcdbs",
+			},
+		}
+		configData, _ := json.Marshal(config)
+		os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), configData, 0644)
+
+		m := &Manager{
+			Interval:       time.Second,
+			Server:         &mockServer{},
+			GameDataDir:    gameDataDir,
+			StagingDir:     stagingDir,
+			BackupTimeout:  2 * time.Second,
+			PruneRetention: "--keep-daily 7",
+			ResticRunner: func(ctx context.Context, stagingDir string) error {
+				return nil // Backup succeeds
+			},
+			PruneRunner: func(ctx context.Context, retentionOptions string) error {
+				return fmt.Errorf("simulated prune failure")
+			},
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
+			},
+		}
+
+		// Create a backup file that will be found
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			backupFile := filepath.Join(backupsDir, "backup.vcdbs")
+			os.WriteFile(backupFile, []byte("backup data"), 0644)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := m.performBackup(ctx, false)
+		if err == nil {
+			t.Error("Expected performBackup to fail when prune fails")
+		}
+
+		if !strings.Contains(err.Error(), "prune") {
+			t.Errorf("Error should mention prune, got: %v", err)
+		}
+	})
+
+	t.Run("prune is skipped when PruneRetention is empty", func(t *testing.T) {
+		gameDataDir := t.TempDir()
+		stagingDir := t.TempDir()
+		backupsDir := filepath.Join(gameDataDir, "Backups")
+		os.MkdirAll(backupsDir, 0755)
+
+		// Create serverconfig.json
+		config := map[string]interface{}{
+			"WorldConfig": map[string]interface{}{
+				"SaveFileLocation": "/gamedata/Saves/test.vcdbs",
+			},
+		}
+		configData, _ := json.Marshal(config)
+		os.WriteFile(filepath.Join(gameDataDir, "serverconfig.json"), configData, 0644)
+
+		pruneCalled := false
+
+		m := &Manager{
+			Interval:       time.Second,
+			Server:         &mockServer{},
+			GameDataDir:    gameDataDir,
+			StagingDir:     stagingDir,
+			BackupTimeout:  2 * time.Second,
+			PruneRetention: "", // Empty - no pruning
+			ResticRunner: func(ctx context.Context, stagingDir string) error {
+				return nil
+			},
+			PruneRunner: func(ctx context.Context, retentionOptions string) error {
+				pruneCalled = true
+				return nil
+			},
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
+				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
+			},
+		}
+
+		// Create a backup file that will be found
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			backupFile := filepath.Join(backupsDir, "backup.vcdbs")
+			os.WriteFile(backupFile, []byte("backup data"), 0644)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		err := m.performBackup(ctx, false)
+		if err != nil {
+			t.Errorf("performBackup() unexpected error: %v", err)
+		}
+
+		if pruneCalled {
+			t.Error("PruneRunner should not be called when PruneRetention is empty")
+		}
+	})
+}

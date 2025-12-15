@@ -63,6 +63,9 @@ func run() error {
 		if backupConfig.PauseWhenNoPlayers {
 			fmt.Println("Backups will pause when no players are online.")
 		}
+		if backupConfig.PruneRetention != "" {
+			fmt.Printf("Prune retention configured: %s\n", backupConfig.PruneRetention)
+		}
 
 		// Validate that required restic environment variables are set
 		if err := backup.ValidateResticEnv(); err != nil {
@@ -121,6 +124,7 @@ func run() error {
 			BackupCompletionWaiter: srv, // Wait for "[Server Notification] Backup complete!" before vacuuming
 			PlayerChecker:          playerChecker,
 			PauseWhenNoPlayers:     backupConfig.PauseWhenNoPlayers,
+			PruneRetention:         backupConfig.PruneRetention,
 			OnBackupStart: func() {
 				fmt.Println("Starting backup...")
 			},

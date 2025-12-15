@@ -37,6 +37,10 @@ var ErrServerNotBooted = fmt.Errorf("server has not fully booted yet")
 // This allows for testing without actually running restic.
 type ResticRunner func(ctx context.Context, stagingDir string) error
 
+// PruneRunner is a function type for running restic forget --prune.
+// This allows for testing without actually running restic.
+type PruneRunner func(ctx context.Context, retentionOptions string) error
+
 // CommandRunner is a function type for running shell commands.
 // This allows for testing without actually running commands.
 // Returns the exit code and any error.
@@ -120,6 +124,11 @@ type Manager struct {
 	// This is primarily for testing.
 	ResticRunner ResticRunner
 
+	// PruneRunner is a custom function to run restic forget --prune.
+	// If nil, the default restic forget command is used.
+	// This is primarily for testing.
+	PruneRunner PruneRunner
+
 	// CommandRunner is a custom function to run shell commands.
 	// If nil, the default exec.Command is used.
 	// This is primarily for testing.
@@ -129,6 +138,11 @@ type Manager struct {
 	// If nil, the default vcdbtree.Split is used.
 	// This is primarily for testing.
 	VCDBTreeSplitter VCDBTreeSplitter
+
+	// PruneRetention contains the retention options for restic forget --prune.
+	// If set, runs `restic forget <options> --prune` after each backup.
+	// Example: "--keep-daily 7 --keep-weekly 4 --keep-monthly 12"
+	PruneRetention string
 
 	done   chan struct{}
 	wg     sync.WaitGroup
@@ -288,6 +302,11 @@ func (m *Manager) performBackup(ctx context.Context, skipPlayerCheck bool) error
 	// Step 6: Run restic backup on the staging directory
 	if err := m.runRestic(ctx); err != nil {
 		return fmt.Errorf("failed to run restic backup: %w", err)
+	}
+
+	// Step 7: Run restic forget --prune if retention is configured
+	if err := m.runResticPrune(ctx); err != nil {
+		return fmt.Errorf("failed to run restic prune: %w", err)
 	}
 
 	// Note: The staging directory is persistent and not cleaned up after backup.
@@ -500,6 +519,38 @@ func (m *Manager) runRestic(ctx context.Context) error {
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("restic backup failed: %w", err)
+	}
+
+	return nil
+}
+
+// runResticPrune runs restic forget with the configured retention options and --prune.
+// This removes old snapshots according to the retention policy.
+func (m *Manager) runResticPrune(ctx context.Context) error {
+	if m.PruneRetention == "" {
+		return nil // No pruning configured
+	}
+
+	// Use custom runner if provided (for testing)
+	if m.PruneRunner != nil {
+		return m.PruneRunner(ctx, m.PruneRetention)
+	}
+
+	fmt.Printf("Running restic forget with retention: %s\n", m.PruneRetention)
+
+	// Parse the retention options string into arguments
+	// Split on whitespace to get individual arguments
+	args := strings.Fields(m.PruneRetention)
+	// Always add --prune at the end
+	args = append(args, "--prune")
+
+	// Build the command: restic forget <options> --prune
+	cmd := exec.CommandContext(ctx, "restic", append([]string{"forget"}, args...)...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("restic forget --prune failed: %w", err)
 	}
 
 	return nil

@@ -35,6 +35,7 @@ services:
       RESTIC_PASSWORD: "your-restic-password"
       DO_BACKUP_ON_SERVER_START: "true"
       BACKUP_PAUSE_WHEN_NO_PLAYERS: "true"
+      PRUNE_RESTIC_RETENTION: "--keep-daily 7 --keep-weekly 4 --keep-monthly 12"
 
       # Set according to your Restic configuration. See https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html
       # AWS_ACCESS_KEY_ID: ""
@@ -70,6 +71,7 @@ volumes:
 | `RESTIC_PASSWORD` | Restic repository password (required if backups enabled) |
 | `DO_BACKUP_ON_SERVER_START` | If `true`, triggers a backup immediately when the server boots |
 | `BACKUP_PAUSE_WHEN_NO_PLAYERS` | If `true`, skips backups when no players are online |
+| `PRUNE_RESTIC_RETENTION` | Retention options for `restic forget --prune`. If set, runs after each backup to remove old snapshots. Example: `--keep-daily 7 --keep-weekly 4 --keep-monthly 12` |
 
 Additional Restic backend credentials (e.g., `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `B2_ACCOUNT_ID`) should be set according to your storage backend. See https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html
 

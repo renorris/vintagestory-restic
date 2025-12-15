@@ -22,6 +22,11 @@ type Config struct {
 	// PauseWhenNoPlayers indicates whether backups should be skipped when
 	// no players are online.
 	PauseWhenNoPlayers bool
+
+	// PruneRetention contains the retention options for restic forget --prune.
+	// If set, runs `restic forget <options> --prune` after each backup.
+	// Example: "--keep-daily 7 --keep-weekly 4 --keep-monthly 12"
+	PruneRetention string
 }
 
 // LoadConfig loads backup configuration from environment variables.
@@ -43,12 +48,14 @@ func LoadConfig() (*Config, error) {
 
 	backupOnStart := parseBoolEnv(os.Getenv("DO_BACKUP_ON_SERVER_START"))
 	pauseWhenNoPlayers := parseBoolEnv(os.Getenv("BACKUP_PAUSE_WHEN_NO_PLAYERS"))
+	pruneRetention := strings.TrimSpace(os.Getenv("PRUNE_RESTIC_RETENTION"))
 
 	return &Config{
 		Enabled:             true,
 		Interval:            interval,
 		BackupOnServerStart: backupOnStart,
 		PauseWhenNoPlayers:  pauseWhenNoPlayers,
+		PruneRetention:      pruneRetention,
 	}, nil
 }
 

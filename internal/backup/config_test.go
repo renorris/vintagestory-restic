@@ -289,6 +289,63 @@ func TestLoadConfig_PauseWhenNoPlayers(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_PruneRetention(t *testing.T) {
+	tests := []struct {
+		name                 string
+		pruneEnv             string
+		expectPruneRetention string
+	}{
+		{
+			name:                 "not set",
+			pruneEnv:             "",
+			expectPruneRetention: "",
+		},
+		{
+			name:                 "simple keep-daily",
+			pruneEnv:             "--keep-daily 7",
+			expectPruneRetention: "--keep-daily 7",
+		},
+		{
+			name:                 "multiple retention options",
+			pruneEnv:             "--keep-daily 7 --keep-weekly 4 --keep-monthly 12",
+			expectPruneRetention: "--keep-daily 7 --keep-weekly 4 --keep-monthly 12",
+		},
+		{
+			name:                 "whitespace is trimmed",
+			pruneEnv:             "  --keep-daily 7  ",
+			expectPruneRetention: "--keep-daily 7",
+		},
+		{
+			name:                 "keep-last option",
+			pruneEnv:             "--keep-last 10",
+			expectPruneRetention: "--keep-last 10",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			os.Setenv("BACKUP_INTERVAL", "1h")
+			defer os.Unsetenv("BACKUP_INTERVAL")
+
+			if tt.pruneEnv == "" {
+				os.Unsetenv("PRUNE_RESTIC_RETENTION")
+			} else {
+				os.Setenv("PRUNE_RESTIC_RETENTION", tt.pruneEnv)
+			}
+			defer os.Unsetenv("PRUNE_RESTIC_RETENTION")
+
+			config, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig() unexpected error: %v", err)
+			}
+
+			if config.PruneRetention != tt.expectPruneRetention {
+				t.Errorf("LoadConfig().PruneRetention = %q, want %q", config.PruneRetention, tt.expectPruneRetention)
+			}
+		})
+	}
+}
+
 func TestValidateResticEnv(t *testing.T) {
 	tests := []struct {
 		name           string

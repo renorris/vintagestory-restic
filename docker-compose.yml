@@ -12,6 +12,7 @@ services:
       RESTIC_PASSWORD: "your-restic-password"
       DO_BACKUP_ON_SERVER_START: "true"
       BACKUP_PAUSE_WHEN_NO_PLAYERS: "true"
+      PRUNE_RESTIC_RETENTION: "--keep-daily 7 --keep-weekly 4 --keep-monthly 12"
 
       # Set according to your Restic configuration. See https://restic.readthedocs.io/en/stable/030_preparing_a_new_repo.html
       # AWS_ACCESS_KEY_ID: ""
