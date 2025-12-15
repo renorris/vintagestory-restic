@@ -370,18 +370,21 @@ func TestManager_CreateStagingDirectory(t *testing.T) {
 		GameDataDir: gameDataDir,
 		StagingDir:  stagingDir,
 		// Mock VCDBTreeSplitter to create a marker file (simulates vcdbtree.Split)
-		VCDBTreeSplitter: func(srcPath, dstDir string) error {
+		VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 			// Create the vcdbtree structure with a marker file
 			if err := os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755); err != nil {
-				return err
+				return 0, 0, err
 			}
-			return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+			if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+				return 0, 0, err
+			}
+			return 1, 0, nil
 		},
 	}
 
-	// Create staging directory
-	if err := m.createStagingDirectory(backupFile, "default.vcdbs"); err != nil {
-		t.Fatalf("createStagingDirectory() failed: %v", err)
+	// Update staging directory
+	if err := m.updateStagingDirectory(backupFile, "default.vcdbs"); err != nil {
+		t.Fatalf("updateStagingDirectory() failed: %v", err)
 	}
 
 	// Verify directories exist in staging
@@ -564,60 +567,6 @@ func TestManager_Callbacks(t *testing.T) {
 	}
 }
 
-func TestCopyFileRegular(t *testing.T) {
-	tmpDir := t.TempDir()
-	srcFile := filepath.Join(tmpDir, "source.txt")
-	dstFile := filepath.Join(tmpDir, "dest.txt")
-
-	content := "test content for copy"
-	if err := os.WriteFile(srcFile, []byte(content), 0644); err != nil {
-		t.Fatalf("Failed to write source file: %v", err)
-	}
-
-	if err := copyFileRegular(srcFile, dstFile); err != nil {
-		t.Fatalf("copyFileRegular() failed: %v", err)
-	}
-
-	read, err := os.ReadFile(dstFile)
-	if err != nil {
-		t.Fatalf("Failed to read dest file: %v", err)
-	}
-
-	if string(read) != content {
-		t.Errorf("copyFileRegular() content = %q, want %q", string(read), content)
-	}
-}
-
-func TestCopyDirCoW(t *testing.T) {
-	srcDir := t.TempDir()
-	dstDir := filepath.Join(t.TempDir(), "dest")
-
-	// Create source structure
-	subDir := filepath.Join(srcDir, "subdir")
-	os.MkdirAll(subDir, 0755)
-
-	os.WriteFile(filepath.Join(srcDir, "file1.txt"), []byte("content1"), 0644)
-	os.WriteFile(filepath.Join(subDir, "file2.txt"), []byte("content2"), 0644)
-
-	if err := copyDirCoW(srcDir, dstDir); err != nil {
-		t.Fatalf("copyDirCoW() failed: %v", err)
-	}
-
-	// Verify structure
-	if _, err := os.Stat(filepath.Join(dstDir, "file1.txt")); os.IsNotExist(err) {
-		t.Error("Expected file1.txt to exist")
-	}
-	if _, err := os.Stat(filepath.Join(dstDir, "subdir", "file2.txt")); os.IsNotExist(err) {
-		t.Error("Expected subdir/file2.txt to exist")
-	}
-
-	// Verify content
-	content, _ := os.ReadFile(filepath.Join(dstDir, "subdir", "file2.txt"))
-	if string(content) != "content2" {
-		t.Errorf("File content = %q, want %q", string(content), "content2")
-	}
-}
-
 func TestManager_IsFileUnlocked_UnlockedFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "unlocked.txt")
@@ -770,9 +719,12 @@ func TestManager_PerformBackup_CleansUpBackupFile(t *testing.T) {
 			return nil
 		},
 		// Mock VCDBTreeSplitter to create marker files
-		VCDBTreeSplitter: func(srcPath, dstDir string) error {
+		VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 			os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-			return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+			if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+				return 0, 0, err
+			}
+			return 1, 0, nil
 		},
 	}
 
@@ -796,13 +748,13 @@ func TestManager_PerformBackup_CleansUpBackupFile(t *testing.T) {
 		t.Error("Expected backup file to be deleted after successful backup")
 	}
 
-	// Verify the staging directory was cleaned up
-	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
-		t.Error("Expected staging directory to be cleaned up after backup")
+	// Verify the staging directory still exists (it's now persistent)
+	if _, err := os.Stat(stagingDir); os.IsNotExist(err) {
+		t.Error("Expected staging directory to persist after backup (for restic efficiency)")
 	}
 }
 
-func TestManager_PerformBackup_CleansUpStagingOnResticFailure(t *testing.T) {
+func TestManager_PerformBackup_PersistsStagingOnResticFailure(t *testing.T) {
 	gameDataDir := t.TempDir()
 	stagingDir := t.TempDir()
 	backupsDir := filepath.Join(gameDataDir, "Backups")
@@ -828,9 +780,12 @@ func TestManager_PerformBackup_CleansUpStagingOnResticFailure(t *testing.T) {
 			return fmt.Errorf("simulated restic failure")
 		},
 		// Mock VCDBTreeSplitter to create marker files
-		VCDBTreeSplitter: func(srcPath, dstDir string) error {
+		VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 			os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-			return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+			if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+				return 0, 0, err
+			}
+			return 1, 0, nil
 		},
 	}
 
@@ -849,17 +804,14 @@ func TestManager_PerformBackup_CleansUpStagingOnResticFailure(t *testing.T) {
 		t.Fatal("performBackup() expected to fail when restic fails")
 	}
 
-	// The backup file was moved to staging and then staging was cleaned up,
-	// so the file should no longer exist at the original location.
-	// This is a trade-off: we use move instead of copy to avoid copying
-	// potentially very large save files.
+	// The backup file was deleted after being processed
 	if _, err := os.Stat(backupFile); !os.IsNotExist(err) {
-		t.Error("Backup file should not exist at original location (was moved to staging)")
+		t.Error("Backup file should not exist at original location (was processed)")
 	}
 
-	// Staging directory should be cleaned up via defer
-	if _, err := os.Stat(stagingDir); !os.IsNotExist(err) {
-		t.Error("Expected staging directory to be cleaned up even on failure")
+	// Staging directory should persist even on failure (for efficiency on retry)
+	if _, err := os.Stat(stagingDir); os.IsNotExist(err) {
+		t.Error("Expected staging directory to persist even on failure (for restic efficiency)")
 	}
 }
 
@@ -911,9 +863,12 @@ func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
 			},
 		}
 
@@ -958,9 +913,12 @@ func TestManager_PerformBackup_BootCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
 			},
 		}
 
@@ -1113,9 +1071,12 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
 			},
 		}
 
@@ -1166,9 +1127,12 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
 			},
 		}
 
@@ -1217,9 +1181,12 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
 			},
 		}
 
@@ -1269,9 +1236,12 @@ func TestManager_PerformBackup_PlayerCheckGuard(t *testing.T) {
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
 			},
 		}
 
@@ -1454,15 +1424,15 @@ func TestManager_SplitToVCDBTree(t *testing.T) {
 		m := &Manager{
 			Interval: time.Second,
 			Server:   &mockServer{},
-			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 				splitterCalled = true
 				capturedSrc = srcPath
 				capturedDst = dstDir
-				return nil
+				return 1, 0, nil
 			},
 		}
 
-		err := m.splitToVCDBTree("/src/path.vcdbs", "/dst/path")
+		_, _, err := m.splitToVCDBTree("/src/path.vcdbs", "/dst/path")
 		if err != nil {
 			t.Fatalf("splitToVCDBTree() failed: %v", err)
 		}
@@ -1484,12 +1454,12 @@ func TestManager_SplitToVCDBTree(t *testing.T) {
 		m := &Manager{
 			Interval: time.Second,
 			Server:   &mockServer{},
-			VCDBTreeSplitter: func(srcPath, dstDir string) error {
-				return expectedErr
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
+				return 0, 0, expectedErr
 			},
 		}
 
-		err := m.splitToVCDBTree("/src/path.vcdbs", "/dst/path")
+		_, _, err := m.splitToVCDBTree("/src/path.vcdbs", "/dst/path")
 		if err != expectedErr {
 			t.Errorf("splitToVCDBTree() error = %v, want %v", err, expectedErr)
 		}
@@ -1526,19 +1496,22 @@ func TestManager_CreateStagingDirectory_SplitsToVCDBTree(t *testing.T) {
 		Server:      &mockServer{},
 		GameDataDir: gameDataDir,
 		StagingDir:  stagingDir,
-		VCDBTreeSplitter: func(srcPath, dstDir string) error {
+		VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 			splitterCalled = true
 			splitterSrc = srcPath
 			splitterDst = dstDir
 			// Create a marker file to simulate vcdbtree split
 			os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-			return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+			if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+				return 0, 0, err
+			}
+			return 1, 0, nil
 		},
 	}
 
 	// Create staging directory
-	if err := m.createStagingDirectory(backupFile, "default.vcdbs"); err != nil {
-		t.Fatalf("createStagingDirectory() failed: %v", err)
+	if err := m.updateStagingDirectory(backupFile, "default.vcdbs"); err != nil {
+		t.Fatalf("updateStagingDirectory() failed: %v", err)
 	}
 
 	// Verify splitter was called
@@ -1585,14 +1558,14 @@ func TestManager_CreateStagingDirectory_SplitFailure(t *testing.T) {
 		Server:      &mockServer{},
 		GameDataDir: gameDataDir,
 		StagingDir:  stagingDir,
-		VCDBTreeSplitter: func(srcPath, dstDir string) error {
-			return fmt.Errorf("simulated split failure")
+		VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
+			return 0, 0, fmt.Errorf("simulated split failure")
 		},
 	}
 
-	err := m.createStagingDirectory(backupFile, "default.vcdbs")
+	err := m.updateStagingDirectory(backupFile, "default.vcdbs")
 	if err == nil {
-		t.Error("createStagingDirectory() expected error when split fails")
+		t.Error("updateStagingDirectory() expected error when split fails")
 	}
 
 	if !strings.Contains(err.Error(), "vcdbtree") {
@@ -1674,9 +1647,12 @@ func TestManager_WaitForBackupFile_WaitsForBackupCompletionNotification(t *testi
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
 			},
 		}
 
@@ -1811,9 +1787,12 @@ func TestManager_WaitForBackupFile_WaitsForBackupCompletionNotification(t *testi
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
 			},
 		}
 
@@ -1865,12 +1844,15 @@ func TestManager_WaitForBackupFile_WaitsForBackupCompletionNotification(t *testi
 			ResticRunner: func(ctx context.Context, stagingDir string) error {
 				return nil
 			},
-			VCDBTreeSplitter: func(srcPath, dstDir string) error {
+			VCDBTreeSplitter: func(srcPath, dstDir string) (int, int, error) {
 				mu.Lock()
 				order = append(order, "split")
 				mu.Unlock()
 				os.MkdirAll(filepath.Join(dstDir, "gamedata"), 0755)
-				return os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644)
+				if err := os.WriteFile(filepath.Join(dstDir, "gamedata", "1.bin"), []byte("test"), 0644); err != nil {
+					return 0, 0, err
+				}
+				return 1, 0, nil
 			},
 		}
 

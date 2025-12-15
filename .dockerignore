@@ -29,6 +29,7 @@ vcdbtree
 serverbinaries
 gamedata
 restic_dst
+backupcache
 
 # Documentation (not needed in container)
 README.md

@@ -644,3 +644,507 @@ func TestSplit_LargePositionValues(t *testing.T) {
 		}
 	}
 }
+
+// === SplitWithCache Tests ===
+
+func TestSplitWithCache_FirstRun(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.vcdbs")
+	cacheDir := filepath.Join(tmpDir, "cache")
+
+	createTestDatabase(t, dbPath)
+
+	written, skipped, err := SplitWithCache(dbPath, cacheDir)
+	if err != nil {
+		t.Fatalf("SplitWithCache() failed: %v", err)
+	}
+
+	// On first run, all files should be written
+	if written == 0 {
+		t.Error("Expected some files to be written on first run")
+	}
+	if skipped != 0 {
+		t.Errorf("Expected 0 skipped on first run, got %d", skipped)
+	}
+
+	// Verify directory structure exists
+	expectedDirs := []string{"chunks", "mapchunks", "mapregions", "gamedata", "playerdata"}
+	for _, dir := range expectedDirs {
+		path := filepath.Join(cacheDir, dir)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Errorf("Expected directory %s to exist: %v", dir, err)
+			continue
+		}
+		if !info.IsDir() {
+			t.Errorf("Expected %s to be a directory", dir)
+		}
+	}
+}
+
+func TestSplitWithCache_SecondRunNoChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.vcdbs")
+	cacheDir := filepath.Join(tmpDir, "cache")
+
+	createTestDatabase(t, dbPath)
+
+	// First run
+	written1, skipped1, err := SplitWithCache(dbPath, cacheDir)
+	if err != nil {
+		t.Fatalf("First SplitWithCache() failed: %v", err)
+	}
+	totalFiles := written1 + skipped1
+
+	// Get mtimes of all files
+	mtimes := make(map[string]int64)
+	filepath.Walk(cacheDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			mtimes[path] = info.ModTime().UnixNano()
+		}
+		return nil
+	})
+
+	// Second run with same data
+	written2, skipped2, err := SplitWithCache(dbPath, cacheDir)
+	if err != nil {
+		t.Fatalf("Second SplitWithCache() failed: %v", err)
+	}
+
+	// All files should be skipped (unchanged)
+	if written2 != 0 {
+		t.Errorf("Expected 0 files written on second run, got %d", written2)
+	}
+	if skipped2 != totalFiles {
+		t.Errorf("Expected %d files skipped on second run, got %d", totalFiles, skipped2)
+	}
+
+	// Verify mtimes are unchanged
+	filepath.Walk(cacheDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			if mtimes[path] != info.ModTime().UnixNano() {
+				t.Errorf("File %s mtime changed when it shouldn't have", path)
+			}
+		}
+		return nil
+	})
+}
+
+func TestSplitWithCache_ChangedData(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.vcdbs")
+	cacheDir := filepath.Join(tmpDir, "cache")
+
+	createTestDatabase(t, dbPath)
+
+	// First run
+	_, _, err := SplitWithCache(dbPath, cacheDir)
+	if err != nil {
+		t.Fatalf("First SplitWithCache() failed: %v", err)
+	}
+
+	// Modify the database - update one chunk
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	_, err = db.Exec("UPDATE chunk SET data = ? WHERE position = 0", []byte("modified_chunk_zero"))
+	if err != nil {
+		db.Close()
+		t.Fatalf("Failed to update chunk: %v", err)
+	}
+	db.Close()
+
+	// Second run
+	written2, skipped2, err := SplitWithCache(dbPath, cacheDir)
+	if err != nil {
+		t.Fatalf("Second SplitWithCache() failed: %v", err)
+	}
+
+	// Only one file should be written
+	if written2 != 1 {
+		t.Errorf("Expected 1 file written on second run, got %d", written2)
+	}
+	if skipped2 == 0 {
+		t.Error("Expected some files to be skipped on second run")
+	}
+
+	// Verify the updated content
+	filePath := GetShardedPath(cacheDir, "chunks", 0)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("Failed to read updated chunk: %v", err)
+	}
+	if string(data) != "modified_chunk_zero" {
+		t.Errorf("Chunk data = %q, want %q", string(data), "modified_chunk_zero")
+	}
+}
+
+func TestSplitWithCache_DeletedChunks(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.vcdbs")
+	cacheDir := filepath.Join(tmpDir, "cache")
+
+	createTestDatabase(t, dbPath)
+
+	// First run
+	_, _, err := SplitWithCache(dbPath, cacheDir)
+	if err != nil {
+		t.Fatalf("First SplitWithCache() failed: %v", err)
+	}
+
+	// Get the path of the chunk at position 0
+	chunkPath := GetShardedPath(cacheDir, "chunks", 0)
+
+	// Verify it exists
+	if _, err := os.Stat(chunkPath); os.IsNotExist(err) {
+		t.Fatalf("Expected chunk file to exist at %s", chunkPath)
+	}
+
+	// Delete the chunk from database
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	_, err = db.Exec("DELETE FROM chunk WHERE position = 0")
+	if err != nil {
+		db.Close()
+		t.Fatalf("Failed to delete chunk: %v", err)
+	}
+	db.Close()
+
+	// Second run
+	_, _, err = SplitWithCache(dbPath, cacheDir)
+	if err != nil {
+		t.Fatalf("Second SplitWithCache() failed: %v", err)
+	}
+
+	// Verify the chunk file was removed
+	if _, err := os.Stat(chunkPath); !os.IsNotExist(err) {
+		t.Errorf("Expected chunk file to be deleted at %s", chunkPath)
+	}
+}
+
+func TestSplitWithCache_NewChunks(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.vcdbs")
+	cacheDir := filepath.Join(tmpDir, "cache")
+
+	createTestDatabase(t, dbPath)
+
+	// First run
+	written1, _, err := SplitWithCache(dbPath, cacheDir)
+	if err != nil {
+		t.Fatalf("First SplitWithCache() failed: %v", err)
+	}
+
+	// Add a new chunk to the database
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	newPosition := int64(9999999)
+	_, err = db.Exec("INSERT INTO chunk (position, data) VALUES (?, ?)", newPosition, []byte("new_chunk"))
+	if err != nil {
+		db.Close()
+		t.Fatalf("Failed to insert new chunk: %v", err)
+	}
+	db.Close()
+
+	// Second run
+	written2, skipped2, err := SplitWithCache(dbPath, cacheDir)
+	if err != nil {
+		t.Fatalf("Second SplitWithCache() failed: %v", err)
+	}
+
+	// One new file should be written
+	if written2 != 1 {
+		t.Errorf("Expected 1 file written on second run, got %d", written2)
+	}
+
+	// Previous files should be skipped
+	if skipped2 != written1 {
+		t.Errorf("Expected %d files skipped on second run, got %d", written1, skipped2)
+	}
+
+	// Verify the new chunk exists
+	newChunkPath := GetShardedPath(cacheDir, "chunks", newPosition)
+	data, err := os.ReadFile(newChunkPath)
+	if err != nil {
+		t.Fatalf("Failed to read new chunk: %v", err)
+	}
+	if string(data) != "new_chunk" {
+		t.Errorf("New chunk data = %q, want %q", string(data), "new_chunk")
+	}
+}
+
+func TestFileMatchesContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "test.bin")
+
+	testData := []byte("test content")
+	if err := os.WriteFile(filePath, testData, 0644); err != nil {
+		t.Fatalf("Failed to write test file: %v", err)
+	}
+
+	t.Run("matching content", func(t *testing.T) {
+		if !fileMatchesContent(filePath, testData) {
+			t.Error("Expected fileMatchesContent to return true for matching content")
+		}
+	})
+
+	t.Run("different content", func(t *testing.T) {
+		if fileMatchesContent(filePath, []byte("different")) {
+			t.Error("Expected fileMatchesContent to return false for different content")
+		}
+	})
+
+	t.Run("different size", func(t *testing.T) {
+		if fileMatchesContent(filePath, []byte("longer content here")) {
+			t.Error("Expected fileMatchesContent to return false for different size")
+		}
+	})
+
+	t.Run("non-existent file", func(t *testing.T) {
+		if fileMatchesContent(filepath.Join(tmpDir, "nonexistent"), testData) {
+			t.Error("Expected fileMatchesContent to return false for non-existent file")
+		}
+	})
+}
+
+func TestCopyFileIfChanged(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "src.bin")
+	dstPath := filepath.Join(tmpDir, "dst.bin")
+
+	srcData := []byte("source content")
+	if err := os.WriteFile(srcPath, srcData, 0644); err != nil {
+		t.Fatalf("Failed to write source file: %v", err)
+	}
+
+	t.Run("destination doesn't exist", func(t *testing.T) {
+		written, err := CopyFileIfChanged(srcPath, dstPath)
+		if err != nil {
+			t.Fatalf("CopyFileIfChanged failed: %v", err)
+		}
+		if !written {
+			t.Error("Expected file to be written")
+		}
+
+		dstData, err := os.ReadFile(dstPath)
+		if err != nil {
+			t.Fatalf("Failed to read destination: %v", err)
+		}
+		if string(dstData) != string(srcData) {
+			t.Errorf("Destination content = %q, want %q", string(dstData), string(srcData))
+		}
+	})
+
+	t.Run("destination matches", func(t *testing.T) {
+		written, err := CopyFileIfChanged(srcPath, dstPath)
+		if err != nil {
+			t.Fatalf("CopyFileIfChanged failed: %v", err)
+		}
+		if written {
+			t.Error("Expected file to be skipped (unchanged)")
+		}
+	})
+
+	t.Run("destination differs", func(t *testing.T) {
+		// Modify destination
+		if err := os.WriteFile(dstPath, []byte("different"), 0644); err != nil {
+			t.Fatalf("Failed to modify destination: %v", err)
+		}
+
+		written, err := CopyFileIfChanged(srcPath, dstPath)
+		if err != nil {
+			t.Fatalf("CopyFileIfChanged failed: %v", err)
+		}
+		if !written {
+			t.Error("Expected file to be written")
+		}
+
+		dstData, err := os.ReadFile(dstPath)
+		if err != nil {
+			t.Fatalf("Failed to read destination: %v", err)
+		}
+		if string(dstData) != string(srcData) {
+			t.Errorf("Destination content = %q, want %q", string(dstData), string(srcData))
+		}
+	})
+}
+
+func TestSyncDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "src")
+	dstDir := filepath.Join(tmpDir, "dst")
+
+	// Create source directory structure
+	os.MkdirAll(filepath.Join(srcDir, "subdir"), 0755)
+	os.WriteFile(filepath.Join(srcDir, "file1.txt"), []byte("content1"), 0644)
+	os.WriteFile(filepath.Join(srcDir, "subdir", "file2.txt"), []byte("content2"), 0644)
+
+	t.Run("initial sync", func(t *testing.T) {
+		written, skipped, removed, err := SyncDir(srcDir, dstDir)
+		if err != nil {
+			t.Fatalf("SyncDir failed: %v", err)
+		}
+		if written != 2 {
+			t.Errorf("Expected 2 files written, got %d", written)
+		}
+		if skipped != 0 {
+			t.Errorf("Expected 0 files skipped, got %d", skipped)
+		}
+		if removed != 0 {
+			t.Errorf("Expected 0 files removed, got %d", removed)
+		}
+	})
+
+	t.Run("sync unchanged", func(t *testing.T) {
+		written, skipped, removed, err := SyncDir(srcDir, dstDir)
+		if err != nil {
+			t.Fatalf("SyncDir failed: %v", err)
+		}
+		if written != 0 {
+			t.Errorf("Expected 0 files written, got %d", written)
+		}
+		if skipped != 2 {
+			t.Errorf("Expected 2 files skipped, got %d", skipped)
+		}
+		if removed != 0 {
+			t.Errorf("Expected 0 files removed, got %d", removed)
+		}
+	})
+
+	t.Run("sync with removed file", func(t *testing.T) {
+		// Remove a file from source
+		os.Remove(filepath.Join(srcDir, "file1.txt"))
+
+		written, skipped, removed, err := SyncDir(srcDir, dstDir)
+		if err != nil {
+			t.Fatalf("SyncDir failed: %v", err)
+		}
+		if written != 0 {
+			t.Errorf("Expected 0 files written, got %d", written)
+		}
+		if skipped != 1 {
+			t.Errorf("Expected 1 file skipped, got %d", skipped)
+		}
+		if removed != 1 {
+			t.Errorf("Expected 1 file removed, got %d", removed)
+		}
+
+		// Verify file was removed from destination
+		if _, err := os.Stat(filepath.Join(dstDir, "file1.txt")); !os.IsNotExist(err) {
+			t.Error("Expected file1.txt to be removed from destination")
+		}
+	})
+}
+
+func TestSyncFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "src.txt")
+	dstPath := filepath.Join(tmpDir, "dst.txt")
+
+	t.Run("source doesn't exist, destination doesn't exist", func(t *testing.T) {
+		written, removed, err := SyncFile(srcPath, dstPath)
+		if err != nil {
+			t.Fatalf("SyncFile failed: %v", err)
+		}
+		if written != 0 || removed != 0 {
+			t.Errorf("Expected (0, 0), got (%d, %d)", written, removed)
+		}
+	})
+
+	t.Run("source exists, destination doesn't", func(t *testing.T) {
+		os.WriteFile(srcPath, []byte("content"), 0644)
+
+		written, removed, err := SyncFile(srcPath, dstPath)
+		if err != nil {
+			t.Fatalf("SyncFile failed: %v", err)
+		}
+		if written != 1 || removed != 0 {
+			t.Errorf("Expected (1, 0), got (%d, %d)", written, removed)
+		}
+	})
+
+	t.Run("source exists, destination matches", func(t *testing.T) {
+		written, removed, err := SyncFile(srcPath, dstPath)
+		if err != nil {
+			t.Fatalf("SyncFile failed: %v", err)
+		}
+		if written != 0 || removed != 0 {
+			t.Errorf("Expected (0, 0), got (%d, %d)", written, removed)
+		}
+	})
+
+	t.Run("source removed, destination exists", func(t *testing.T) {
+		os.Remove(srcPath)
+
+		written, removed, err := SyncFile(srcPath, dstPath)
+		if err != nil {
+			t.Fatalf("SyncFile failed: %v", err)
+		}
+		if written != 0 || removed != 1 {
+			t.Errorf("Expected (0, 1), got (%d, %d)", written, removed)
+		}
+
+		// Verify destination was removed
+		if _, err := os.Stat(dstPath); !os.IsNotExist(err) {
+			t.Error("Expected destination to be removed")
+		}
+	})
+}
+
+func TestCopyDirIfChanged(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "src")
+	dstDir := filepath.Join(tmpDir, "dst")
+
+	// Create source directory structure
+	os.MkdirAll(filepath.Join(srcDir, "subdir"), 0755)
+	os.WriteFile(filepath.Join(srcDir, "file1.txt"), []byte("content1"), 0644)
+	os.WriteFile(filepath.Join(srcDir, "subdir", "file2.txt"), []byte("content2"), 0644)
+
+	t.Run("initial copy", func(t *testing.T) {
+		written, skipped, err := CopyDirIfChanged(srcDir, dstDir)
+		if err != nil {
+			t.Fatalf("CopyDirIfChanged failed: %v", err)
+		}
+		if written != 2 {
+			t.Errorf("Expected 2 files written, got %d", written)
+		}
+		if skipped != 0 {
+			t.Errorf("Expected 0 files skipped, got %d", skipped)
+		}
+	})
+
+	t.Run("copy unchanged", func(t *testing.T) {
+		written, skipped, err := CopyDirIfChanged(srcDir, dstDir)
+		if err != nil {
+			t.Fatalf("CopyDirIfChanged failed: %v", err)
+		}
+		if written != 0 {
+			t.Errorf("Expected 0 files written, got %d", written)
+		}
+		if skipped != 2 {
+			t.Errorf("Expected 2 files skipped, got %d", skipped)
+		}
+	})
+
+	t.Run("copy with changed file", func(t *testing.T) {
+		// Modify a file in source
+		os.WriteFile(filepath.Join(srcDir, "file1.txt"), []byte("modified"), 0644)
+
+		written, skipped, err := CopyDirIfChanged(srcDir, dstDir)
+		if err != nil {
+			t.Fatalf("CopyDirIfChanged failed: %v", err)
+		}
+		if written != 1 {
+			t.Errorf("Expected 1 file written, got %d", written)
+		}
+		if skipped != 1 {
+			t.Errorf("Expected 1 file skipped, got %d", skipped)
+		}
+	})
+}

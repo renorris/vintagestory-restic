@@ -22,7 +22,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=1 go build -ldflags '-linkmode external -extldflags "-static"' -o vintagestory-launcher ./cmd/launcher
 
 # Build vcdbtree CLI utility
-# Use static linking to avoid musl libc dependency in Debian runtime image
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=1 go build -ldflags '-linkmode external -extldflags "-static"' -o vcdbtree ./cmd/vcdbtree
@@ -34,8 +33,6 @@ FROM mcr.microsoft.com/dotnet/runtime:8.0-bookworm-slim
 
 # Copy restic from builder
 COPY --from=restic-fetcher /usr/bin/restic /usr/bin/restic
-
-# Note: sqlite3 CLI no longer needed - vcdbtree handles database conversion natively
 
 # Config nonroot user
 RUN mkdir /gamedata /serverbinaries /backupcache && \

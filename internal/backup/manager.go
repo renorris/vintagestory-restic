@@ -45,7 +45,8 @@ type CommandRunner func(ctx context.Context, name string, args ...string) (exitC
 // VCDBTreeSplitter is a function type for splitting a .vcdbs file into vcdbtree format.
 // This allows for testing without actually running the split operation.
 // srcPath is the source .vcdbs file, dstDir is the destination directory.
-type VCDBTreeSplitter func(srcPath, dstDir string) error
+// Returns the number of files written (changed) and skipped (unchanged).
+type VCDBTreeSplitter func(srcPath, dstDir string) (written, skipped int, err error)
 
 // PlayerCheckerInterface is an interface for checking if players are online.
 // This allows for testing without a real player checker.
@@ -78,8 +79,9 @@ type Manager struct {
 	// GameDataDir is the path to the game data directory (e.g., /gamedata).
 	GameDataDir string
 
-	// StagingDir is the path where the staging directory will be created.
-	// If empty, defaults to /tmp/vs-backup-staging.
+	// StagingDir is the path to the persistent staging directory.
+	// This directory persists between backups to optimize for Restic efficiency.
+	// If empty, defaults to /backupcache/staging.
 	StagingDir string
 
 	// Server is the Vintage Story server to send backup commands to.
@@ -164,7 +166,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	if m.StagingDir == "" {
-		m.StagingDir = "/tmp/vs-backup-staging"
+		m.StagingDir = "/backupcache/staging"
 	}
 
 	if m.BackupTimeout <= 0 {
@@ -276,19 +278,18 @@ func (m *Manager) performBackup(ctx context.Context) error {
 		return fmt.Errorf("failed to wait for backup file: %w", err)
 	}
 
-	// Step 5: Create staging directory with CoW copies
-	if err := m.createStagingDirectory(backupFile, saveFileName); err != nil {
-		return fmt.Errorf("failed to create staging directory: %w", err)
+	// Step 5: Update persistent staging directory with changed files only
+	if err := m.updateStagingDirectory(backupFile, saveFileName); err != nil {
+		return fmt.Errorf("failed to update staging directory: %w", err)
 	}
-	defer m.cleanupStaging()
 
 	// Step 6: Run restic backup on the staging directory
 	if err := m.runRestic(ctx); err != nil {
 		return fmt.Errorf("failed to run restic backup: %w", err)
 	}
 
-	// Note: The backup file was moved to the staging directory in step 5,
-	// so it will be automatically cleaned up when the staging directory is removed.
+	// Note: The staging directory is persistent and not cleaned up after backup.
+	// This preserves file metadata for unchanged files, optimizing Restic efficiency.
 
 	return nil
 }
@@ -397,42 +398,39 @@ func (m *Manager) isFileUnlocked(path string) bool {
 	return true
 }
 
-// createStagingDirectory creates the staging directory with copy-on-write copies.
+// updateStagingDirectory updates the persistent staging directory with changed files only.
 // The savegame is converted to vcdbtree format (a directory tree optimized for deduplication).
-func (m *Manager) createStagingDirectory(backupFile, saveFileName string) error {
-	// Clean up any existing staging directory
-	if err := os.RemoveAll(m.StagingDir); err != nil {
-		return fmt.Errorf("failed to remove existing staging directory: %w", err)
-	}
-
-	// Create the staging directory
+// Files that haven't changed preserve their metadata (mtime), optimizing Restic efficiency.
+func (m *Manager) updateStagingDirectory(backupFile, saveFileName string) error {
+	// Ensure the staging directory exists
 	if err := os.MkdirAll(m.StagingDir, 0755); err != nil {
 		return fmt.Errorf("failed to create staging directory: %w", err)
 	}
 
-	// Copy directories using CoW: Logs, Playerdata, Mods
-	dirsToLink := []string{"Logs", "Playerdata", "Mods"}
-	for _, dir := range dirsToLink {
+	// Sync directories: Logs, Playerdata, Mods
+	// Only changed files are written, preserving metadata for unchanged files
+	dirsToSync := []string{"Logs", "Playerdata", "Mods"}
+	for _, dir := range dirsToSync {
 		srcDir := filepath.Join(m.GameDataDir, dir)
 		dstDir := filepath.Join(m.StagingDir, dir)
 
 		if _, err := os.Stat(srcDir); err == nil {
-			if err := copyDirCoW(srcDir, dstDir); err != nil {
-				return fmt.Errorf("failed to copy %s: %w", dir, err)
+			if _, _, _, err := vcdbtree.SyncDir(srcDir, dstDir); err != nil {
+				return fmt.Errorf("failed to sync %s: %w", dir, err)
 			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to stat %s: %w", dir, err)
 		}
 	}
 
-	// Copy config files
+	// Sync config files
 	configFiles := []string{"serverconfig.json", "servermagicnumbers.json"}
 	for _, file := range configFiles {
 		srcFile := filepath.Join(m.GameDataDir, file)
 		dstFile := filepath.Join(m.StagingDir, file)
 
-		if _, err := os.Stat(srcFile); err == nil {
-			if err := copyFileCoW(srcFile, dstFile); err != nil {
-				return fmt.Errorf("failed to copy %s: %w", file, err)
-			}
+		if _, _, err := vcdbtree.SyncFile(srcFile, dstFile); err != nil {
+			return fmt.Errorf("failed to sync %s: %w", file, err)
 		}
 	}
 
@@ -444,14 +442,16 @@ func (m *Manager) createStagingDirectory(backupFile, saveFileName string) error 
 		return fmt.Errorf("failed to create Saves directory: %w", err)
 	}
 
-	// Split the backup file into vcdbtree format.
-	// This produces a directory tree where each BLOB is stored as a separate file,
-	// optimized for Restic's content-defined chunking deduplication.
-	if err := m.splitToVCDBTree(backupFile, savesDir); err != nil {
+	// Split the backup file into vcdbtree format with caching.
+	// Only writes files that have changed, preserving metadata for unchanged files.
+	// This optimizes Restic's deduplication - unchanged files show zero diff.
+	written, skipped, err := m.splitToVCDBTree(backupFile, savesDir)
+	if err != nil {
 		return fmt.Errorf("failed to split backup to vcdbtree: %w", err)
 	}
+	fmt.Printf("vcdbtree: %d files written, %d files unchanged\n", written, skipped)
 
-	// Remove the original backup file since we've split it to the destination
+	// Remove the original backup file since we've processed it
 	if err := os.Remove(backupFile); err != nil {
 		return fmt.Errorf("failed to remove original backup file: %w", err)
 	}
@@ -459,103 +459,19 @@ func (m *Manager) createStagingDirectory(backupFile, saveFileName string) error 
 	return nil
 }
 
-// copyDirCoW recursively copies a directory using copy-on-write when available.
-func copyDirCoW(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Calculate the destination path
-		relPath, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		dstPath := filepath.Join(dst, relPath)
-
-		if info.IsDir() {
-			return os.MkdirAll(dstPath, info.Mode())
-		}
-
-		return copyFileCoW(path, dstPath)
-	})
-}
-
-// copyFileCoW copies a file using copy-on-write (reflink) when available.
-// Falls back to regular copy if CoW is not supported.
-func copyFileCoW(src, dst string) error {
-	// Ensure the destination directory exists
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
-	}
-
-	// Try using cp --reflink=auto for CoW copy
-	// This works on filesystems that support it (btrfs, xfs, zfs, etc.)
-	cmd := exec.Command("cp", "--reflink=auto", src, dst)
-	if err := cmd.Run(); err != nil {
-		// Fall back to regular copy
-		return copyFileRegular(src, dst)
-	}
-
-	return nil
-}
-
-// copyFileRegular performs a regular file copy.
-func copyFileRegular(src, dst string) error {
-	srcFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer srcFile.Close()
-
-	srcInfo, err := srcFile.Stat()
-	if err != nil {
-		return err
-	}
-
-	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
-	if err != nil {
-		return err
-	}
-	defer dstFile.Close()
-
-	buf := make([]byte, 1024*1024) // 1MB buffer
-	for {
-		n, readErr := srcFile.Read(buf)
-		if n > 0 {
-			if _, writeErr := dstFile.Write(buf[:n]); writeErr != nil {
-				return writeErr
-			}
-		}
-		if readErr != nil {
-			if readErr.Error() == "EOF" {
-				break
-			}
-			return readErr
-		}
-	}
-
-	return nil
-}
-
-// splitToVCDBTree converts a .vcdbs SQLite database into vcdbtree format.
-// This directory tree format stores each BLOB as a separate file, maximizing
-// Restic's content-defined chunking deduplication efficiency.
-func (m *Manager) splitToVCDBTree(srcPath, dstDir string) error {
+// splitToVCDBTree converts a .vcdbs SQLite database into vcdbtree format with caching.
+// Only writes files that have changed, preserving metadata for unchanged files.
+// Returns the number of files written (changed) and skipped (unchanged).
+func (m *Manager) splitToVCDBTree(srcPath, dstDir string) (written, skipped int, err error) {
 	// Use custom splitter if provided (for testing)
 	if m.VCDBTreeSplitter != nil {
-		fmt.Printf("Splitting vcdbs to vcdbtree: %s -> %s\n", srcPath, dstDir)
+		fmt.Printf("Splitting vcdbs to vcdbtree (cached): %s -> %s\n", srcPath, dstDir)
 		return m.VCDBTreeSplitter(srcPath, dstDir)
 	}
 
-	fmt.Printf("Splitting vcdbs to vcdbtree: %s -> %s\n", srcPath, dstDir)
+	fmt.Printf("Splitting vcdbs to vcdbtree (cached): %s -> %s\n", srcPath, dstDir)
 
-	return vcdbtree.Split(srcPath, dstDir)
-}
-
-// cleanupStaging removes the staging directory.
-func (m *Manager) cleanupStaging() {
-	os.RemoveAll(m.StagingDir)
+	return vcdbtree.SplitWithCache(srcPath, dstDir)
 }
 
 // runRestic runs restic backup on the staging directory.
